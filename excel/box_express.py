@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+from typing import Iterable
+
+import openpyxl
+
+from excel.models import Carrier, Shipment
+from excel.utils import box_express_output_path, normalize_phone, normalize_text, write_pair_workbook
+
+BOX_EXPRESS_SHEET_NAME = "Worksheet"
+BOX_EXPRESS_VOUCHER_COLUMN = "Αρ. Voucher"
+BOX_EXPRESS_PHONE_COLUMN = "Τηλέφωνο"
+
+
+def _iter_box_express_pairs(path: Path) -> Iterable[tuple[str, str]]:
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        worksheet = workbook[BOX_EXPRESS_SHEET_NAME]
+        rows = worksheet.iter_rows(values_only=True)
+        first_row = next(rows, None)
+        if first_row is None:
+            return
+
+        headers = [normalize_text(value) for value in first_row]
+        if headers and headers[0] == BOX_EXPRESS_VOUCHER_COLUMN:
+            voucher_index = headers.index(BOX_EXPRESS_VOUCHER_COLUMN)
+            phone_index = headers.index(BOX_EXPRESS_PHONE_COLUMN)
+            data_rows = rows
+        else:
+            voucher_index = 0
+            phone_index = 1
+            data_rows = iter((first_row, *rows))
+
+        for row in data_rows:
+            if not row or all(cell is None or str(cell).strip() == "" for cell in row):
+                continue
+
+            voucher = normalize_text(row[voucher_index] if voucher_index < len(row) else None)
+            phone = normalize_text(row[phone_index] if phone_index < len(row) else None)
+            if not voucher or not phone:
+                continue
+
+            yield voucher, phone
+    finally:
+        workbook.close()
+
+
+def trim_box_express_file(
+    path: Path | str,
+    output_path: Path | str | None = None,
+    on_date: date | None = None,
+) -> Path:
+    source = Path(path)
+    destination = (
+        Path(output_path)
+        if output_path is not None
+        else box_express_output_path(source.parent, on_date)
+    )
+    pairs = list(_iter_box_express_pairs(source))
+    return write_pair_workbook(destination, BOX_EXPRESS_SHEET_NAME, pairs)
+
+
+def parse_box_express_file(
+    path: Path | str,
+    output_path: Path | str | None = None,
+    on_date: date | None = None,
+) -> list[Shipment]:
+    source = Path(path)
+    destination = trim_box_express_file(source, output_path=output_path, on_date=on_date)
+
+    shipments: list[Shipment] = []
+    for voucher, phone in _iter_box_express_pairs(destination):
+        normalized_phone = normalize_phone(phone)
+        if not normalized_phone:
+            continue
+
+        shipments.append(
+            Shipment(
+                carrier=Carrier.BOX_EXPRESS,
+                voucher=voucher,
+                recipient_name="",
+                phone=normalized_phone,
+                source_file=destination.name,
+            )
+        )
+
+    return shipments
