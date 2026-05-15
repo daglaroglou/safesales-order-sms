@@ -48,8 +48,10 @@ from win32more.Microsoft.UI.Xaml.Controls import (
     SymbolIcon,
     TextBlock,
     TextBox,
+    TitleBar,
 )
-from win32more.Microsoft.UI.Xaml.Media import FontFamily, MicaBackdrop, SolidColorBrush
+from win32more.Microsoft.UI.Windowing import AppWindowTitleBar, TitleBarHeightOption, TitleBarTheme
+from win32more.Microsoft.UI.Xaml.Media import FontFamily, SolidColorBrush
 from win32more.Microsoft.UI.Xaml.Shapes import Ellipse
 from win32more.Microsoft.Windows.Storage.Pickers import FileOpenPicker, PickFileResult, PickerLocationId
 from win32more.Windows.Foundation import AsyncStatus, TimeSpan
@@ -71,6 +73,11 @@ _WORKSPACE_SIDE_COL_WIDE = 440.0
 _SCROLLVIEW_RIGHT_GUTTER = 18.0
 # EasySMS sender IDs offered in SMS + bulk-send pickers.
 _SENDER_ID_OPTIONS = ("SAFESALES", "DIVERSITY", "TINYCOCOON")
+# Bottom dock left column width — matches NavigationView.OpenPaneLength (content starts at this line).
+_NAV_PANE_WIDTH = 240.0
+_BOTTOM_DOCK_HEIGHT = 180.0
+# Single app chrome grey (dark mode) — one flat background, no Mica / header gradient.
+_APP_GREY_DARK = (43, 43, 43)
 
 
 def _ts() -> str:
@@ -84,6 +91,15 @@ def _rgb(a: int, r: int, g: int, b: int) -> SolidColorBrush:
     c.G = g
     c.B = b
     return SolidColorBrush(c)
+
+
+def _opaque_color(r: int, g: int, b: int) -> Color:
+    c = Color()
+    c.A = 255
+    c.R = r
+    c.G = g
+    c.B = b
+    return c
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,10 +130,11 @@ def _palette_light() -> _ChromePalette:
 
 
 def _palette_dark() -> _ChromePalette:
+    g = _APP_GREY_DARK
     return _ChromePalette(
-        surface=(32, 32, 36),
-        card=(43, 43, 47),
-        border=(58, 58, 64),
+        surface=g,
+        card=g,
+        border=(62, 62, 62),
         muted=(168, 168, 174),
         primary=(243, 243, 243),
         accent=(76, 156, 230),
@@ -134,8 +151,9 @@ class SafeSalesWinUIApp(XamlApplication):
         self._themed_borders: list[Border] = []
         self._root: Grid | None = None
         self._log_wrap: Border | None = None
+        self._status_dock: Border | None = None
+        self._status_pill: Border | None = None
         self._log_header: TextBlock | None = None
-        self._account_outer: Border | None = None
         self._theme_combo: ComboBox | None = None
         self._nav: NavigationView | None = None
         self._nav_item_sms: NavigationViewItem | None = None
@@ -146,15 +164,13 @@ class SafeSalesWinUIApp(XamlApplication):
         self._page_orders: Grid | None = None
         self._page_settings: Grid | None = None
         self._current_route: str = "sms"
-        self._nav_header_title: TextBlock | None = None
-        self._nav_header_subtitle: TextBlock | None = None
+        self._title_bar: TitleBar | None = None
         self._settings_hint: TextBlock | None = None
         self._send_btn: Button | None = None
         self._bulk_btn: Button | None = None
 
         self._window = Window()
         self._window.Title = "SafeSales · SMS"
-        self._window.SystemBackdrop = MicaBackdrop()
 
         self._dispatcher = self._window.DispatcherQueue
         self._client = services.get_client()
@@ -196,8 +212,9 @@ class SafeSalesWinUIApp(XamlApplication):
         self._themed_borders.clear()
         root = Grid()
         self._root = root
+        root.RowDefinitions.Append(self._row_auto())
         root.RowDefinitions.Append(self._row_star())
-        root.RowDefinitions.Append(self._row_px(180))
+        root.RowDefinitions.Append(self._row_px(_BOTTOM_DOCK_HEIGHT))
 
         page_sms = self._build_one_time_tab()
         page_orders = self._build_excel_tab()
@@ -220,15 +237,17 @@ class SafeSalesWinUIApp(XamlApplication):
         page_host.Children.Append(page_orders)
         page_host.Children.Append(page_settings)
 
+        title_bar = self._build_title_bar()
+
         nav = NavigationView()
         self._nav = nav
         nav.PaneDisplayMode = NavigationViewPaneDisplayMode.Left
         nav.IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed
         nav.IsSettingsVisible = False
         nav.IsPaneToggleButtonVisible = False
-        nav.OpenPaneLength = 240.0
+        nav.OpenPaneLength = _NAV_PANE_WIDTH
         nav.PaneTitle = "SafeSales"
-        nav.AlwaysShowHeader = True
+        nav.AlwaysShowHeader = False
         nav.VerticalAlignment = VerticalAlignment.Stretch
         nav.HorizontalAlignment = HorizontalAlignment.Stretch
 
@@ -254,7 +273,6 @@ class SafeSalesWinUIApp(XamlApplication):
         nav.MenuItems.Append(ni_orders)
         nav.MenuItems.Append(ni_settings)
 
-        nav.Header = self._build_top_header()
         nav.Content = page_host
         nav.SelectedItem = ni_sms
 
@@ -298,15 +316,27 @@ class SafeSalesWinUIApp(XamlApplication):
         ):
             self._wire_item_tap(ni, route)
 
-        Grid.SetRow(nav, 0)
+        Grid.SetRow(title_bar, 0)
+        Grid.SetRow(nav, 1)
+        root.Children.Append(title_bar)
         root.Children.Append(nav)
+
+        bottom_bar = Grid()
+        bottom_bar.ColumnDefinitions.Append(self._col_px(_NAV_PANE_WIDTH))
+        bottom_bar.ColumnDefinitions.Append(self._col_star())
+
+        status_dock = self._build_status_dock()
+        Grid.SetColumn(status_dock, 0)
+        bottom_bar.Children.Append(status_dock)
 
         log_wrap = Border()
         self._log_wrap = log_wrap
-        log_wrap.Margin = Thickness(20, 4, 20, 16)
+        log_wrap.Margin = Thickness(0, 4, 20, 16)
         log_wrap.Padding = Thickness(18, 12, 18, 12)
         log_wrap.BorderThickness = Thickness(1, 1, 1, 1)
         log_wrap.CornerRadius = CornerRadiusHelper.FromUniformRadius(12)
+        log_wrap.HorizontalAlignment = HorizontalAlignment.Stretch
+        log_wrap.VerticalAlignment = VerticalAlignment.Stretch
         self._themed_borders.append(log_wrap)
 
         log_inner = Grid()
@@ -337,19 +367,21 @@ class SafeSalesWinUIApp(XamlApplication):
         log_sv.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
         log_sv.VerticalAlignment = VerticalAlignment.Stretch
         log_sv.MinHeight = 56
-        log_sv.MaxHeight = 96
         Grid.SetRow(log_sv, 1)
 
         log_inner.Children.Append(log_header)
         log_inner.Children.Append(log_sv)
         log_wrap.Child = log_inner
+        Grid.SetColumn(log_wrap, 1)
+        bottom_bar.Children.Append(log_wrap)
 
-        Grid.SetRow(log_wrap, 1)
-        root.Children.Append(log_wrap)
+        Grid.SetRow(bottom_bar, 2)
+        root.Children.Append(bottom_bar)
 
         root.ActualThemeChanged += self._on_root_actual_theme_changed
 
         self._window.Content = root
+        self._configure_win11_title_bar()
         self._window.Activate()
         self._apply_initial_window_size()
 
@@ -365,6 +397,7 @@ class SafeSalesWinUIApp(XamlApplication):
         if self._theme_mode != "system":
             return
         self._sync_chrome_brushes()
+        self._configure_win11_title_bar()
         self._set_api_indicator(self._api_online)
 
     def _effective_dark(self) -> bool:
@@ -383,9 +416,25 @@ class SafeSalesWinUIApp(XamlApplication):
         if self._root is None:
             return
         p = self._active_palette()
-        self._root.Background = _rgb(255, *p.surface)
+        surface = _rgb(255, *p.surface)
+        self._root.Background = surface
+        if self._title_bar is not None:
+            self._title_bar.Background = surface
+        if self._nav is not None:
+            self._nav.Background = surface
+            try:
+                self._nav.PaneBackground = surface
+            except Exception:  # noqa: BLE001
+                pass
+        for page in (self._page_sms, self._page_orders, self._page_settings):
+            if page is not None:
+                page.Background = surface
+        if self._page_host is not None:
+            self._page_host.Background = surface
+        if self._log_wrap is not None:
+            self._log_wrap.Background = surface
         for b in self._themed_borders:
-            b.Background = _rgb(255, *p.card)
+            b.Background = surface
             b.BorderBrush = _rgb(255, *p.border)
         if self._log_header is not None:
             self._log_header.Foreground = _rgb(255, *p.primary)
@@ -396,13 +445,9 @@ class SafeSalesWinUIApp(XamlApplication):
             balance_label.Foreground = _rgb(255, *p.muted)
         if self._api_status_text is not None:
             self._api_status_text.Foreground = _rgb(255, *p.muted)
-        account_divider = getattr(self, "_account_divider", None)
-        if account_divider is not None:
-            account_divider.Background = _rgb(255, *p.border)
-        if self._nav_header_title is not None:
-            self._nav_header_title.Foreground = _rgb(255, *p.primary)
-        if self._nav_header_subtitle is not None:
-            self._nav_header_subtitle.Foreground = _rgb(255, *p.muted)
+        if self._status_pill is not None:
+            self._status_pill.Background = _rgb(255, *p.surface)
+            self._status_pill.BorderBrush = _rgb(255, *p.border)
         if self._settings_hint is not None:
             self._settings_hint.Foreground = _rgb(255, *p.muted)
         for ref_name in ("_sms_subtitle", "_orders_subtitle", "_settings_subtitle"):
@@ -419,7 +464,7 @@ class SafeSalesWinUIApp(XamlApplication):
         for tb in (getattr(self, "_excel_files_text", None), getattr(self, "_excel_shipments_text", None)):
             if tb is not None:
                 tb.Foreground = _rgb(255, *p.primary)
-                tb.Background = _rgb(255, *p.card)
+                tb.Background = surface
         if self._sms_status is not None:
             self._sms_status.Foreground = _rgb(255, *p.muted)
         if self._contact_hint is not None:
@@ -464,6 +509,7 @@ class SafeSalesWinUIApp(XamlApplication):
             self._theme_combo_guard = False
 
         self._sync_chrome_brushes()
+        self._configure_win11_title_bar()
 
     def _on_theme_combo_selection(self, sender, args) -> None:
         if self._theme_combo_guard or self._theme_combo is None:
@@ -553,10 +599,9 @@ class SafeSalesWinUIApp(XamlApplication):
             except Exception:  # noqa: BLE001 — selection sync should not break navigation
                 pass
 
-        if self._nav_header_title is not None:
-            self._nav_header_title.Text = header_title
-        if self._nav_header_subtitle is not None:
-            self._nav_header_subtitle.Text = header_subtitle
+        if self._title_bar is not None:
+            self._title_bar.Title = header_title
+            self._title_bar.Subtitle = header_subtitle
 
         if previous_route != route:
             self._log(f"View: {header_title}")
@@ -611,46 +656,82 @@ class SafeSalesWinUIApp(XamlApplication):
         except Exception:  # noqa: BLE001
             pass
 
-    def _build_top_header(self) -> Grid:
-        g = Grid()
-        g.VerticalAlignment = VerticalAlignment.Stretch
-        g.Margin = Thickness(0, 0, 4, 0)
-        c0 = ColumnDefinition()
-        c0.Width = GridLengthHelper.FromValueAndType(1.0, GridUnitType.Star)
-        c1 = ColumnDefinition()
-        c1.Width = GridLengthHelper.FromValueAndType(1.0, GridUnitType.Auto)
-        g.ColumnDefinitions.Append(c0)
-        g.ColumnDefinitions.Append(c1)
+    def _apply_title_bar_colors(self, app_tb: AppWindowTitleBar) -> None:
+        """Caption strip uses the same flat grey as the rest of the shell."""
+        p = self._active_palette()
+        bg = _opaque_color(*p.surface)
+        fg = _opaque_color(*p.primary)
+        muted = _opaque_color(*p.muted)
+        for prop in (
+            "BackgroundColor",
+            "InactiveBackgroundColor",
+            "ButtonBackgroundColor",
+            "ButtonHoverBackgroundColor",
+            "ButtonPressedBackgroundColor",
+            "ButtonInactiveBackgroundColor",
+        ):
+            setattr(app_tb, prop, bg)
+        app_tb.ForegroundColor = fg
+        app_tb.InactiveForegroundColor = muted
+        app_tb.ButtonForegroundColor = fg
+        app_tb.ButtonHoverForegroundColor = fg
+        app_tb.ButtonPressedForegroundColor = fg
+        app_tb.ButtonInactiveForegroundColor = muted
 
-        left = StackPanel()
-        left.Orientation = Orientation.Vertical
-        left.Spacing = 2
-        left.VerticalAlignment = VerticalAlignment.Center
-        left.Margin = Thickness(4, 0, 12, 0)
-        Grid.SetColumn(left, 0)
+    def _configure_win11_title_bar(self) -> None:
+        """Wide WinUI title bar row + flat grey chrome (no Mica tint / dual-tone header)."""
+        w = self._window
+        try:
+            w.ExtendsContentIntoTitleBar = True
+        except Exception:  # noqa: BLE001
+            pass
+        if self._title_bar is not None:
+            try:
+                w.SetTitleBar(self._title_bar)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            app_tb = w.AppWindow.TitleBar
+            if AppWindowTitleBar.IsCustomizationSupported():
+                app_tb.ExtendsContentIntoTitleBar = True
+                app_tb.PreferredHeightOption = TitleBarHeightOption.Standard
+                app_tb.PreferredTheme = TitleBarTheme.Dark if self._effective_dark() else TitleBarTheme.Light
+                self._apply_title_bar_colors(app_tb)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            w.AppWindow.Title = "SafeSales · SMS"
+        except Exception:  # noqa: BLE001
+            pass
 
-        title = TextBlock()
-        self._nav_header_title = title
-        title.Text = "One-time SMS"
-        title.FontSize = 18
-        title.FontWeight = FontWeights.SemiBold
-        title.VerticalAlignment = VerticalAlignment.Center
+    def _build_title_bar(self) -> TitleBar:
+        tb = TitleBar()
+        self._title_bar = tb
+        tb.Title = "One-time SMS"
+        tb.Subtitle = "Single recipient delivery"
+        tb.IsBackButtonVisible = False
+        tb.IsPaneToggleButtonVisible = True
+        add_toggle = getattr(tb, "add_PaneToggleRequested", None)
+        if callable(add_toggle):
+            try:
+                add_toggle(self._on_title_bar_pane_toggle)
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            try:
+                tb.PaneToggleRequested += self._on_title_bar_pane_toggle
+            except Exception:  # noqa: BLE001
+                pass
+        return tb
 
-        subtitle = TextBlock()
-        self._nav_header_subtitle = subtitle
-        subtitle.Text = "Single recipient delivery"
-        subtitle.FontSize = 12
-        subtitle.VerticalAlignment = VerticalAlignment.Center
-
-        left.Children.Append(title)
-        left.Children.Append(subtitle)
-
-        account = self._build_account_strip()
-        Grid.SetColumn(account, 1)
-
-        g.Children.Append(left)
-        g.Children.Append(account)
-        return g
+    def _on_title_bar_pane_toggle(self, sender, args) -> None:
+        nav = self._nav
+        if nav is None:
+            return
+        try:
+            nav.IsPaneOpen = not nav.IsPaneOpen
+        except Exception:  # noqa: BLE001
+            pass
 
     def _setup_pulse_timer(self) -> None:
         t = self._dispatcher.CreateTimer()
@@ -681,6 +762,16 @@ class SafeSalesWinUIApp(XamlApplication):
         rd = RowDefinition()
         rd.Height = GridLengthHelper.FromValueAndType(0.0, GridUnitType.Auto)
         return rd
+
+    def _col_star(self) -> ColumnDefinition:
+        c = ColumnDefinition()
+        c.Width = GridLengthHelper.FromValueAndType(1.0, GridUnitType.Star)
+        return c
+
+    def _col_px(self, w: float) -> ColumnDefinition:
+        c = ColumnDefinition()
+        c.Width = GridLengthHelper.FromPixels(w)
+        return c
 
     def _register_card(self, b: Border) -> Border:
         self._themed_borders.append(b)
@@ -923,7 +1014,7 @@ class SafeSalesWinUIApp(XamlApplication):
         side_body = TextBlock()
         side_body.Text = (
             "SafeSales desktop client for EasySMS.\n\n"
-            "The shell follows Windows 11 Fluent design: Mica backdrop, layered cards, and consistent spacing."
+            "The shell uses a neutral dark theme with layered cards and consistent spacing."
         )
         side_body.TextWrapping = TextWrapping.Wrap
         side_body.FontSize = 13
@@ -940,73 +1031,87 @@ class SafeSalesWinUIApp(XamlApplication):
         pad.Child = content
         return self._fill_page(pad)
 
-    def _build_account_strip(self) -> Border:
+    def _build_status_dock(self) -> Border:
+        """Compact account dock under the nav pane (aligned with the Activity log edge)."""
         outer = Border()
-        self._account_outer = outer
-        outer.Margin = Thickness(0, 0, 0, 0)
-        outer.Padding = Thickness(14, 8, 14, 8)
+        self._status_dock = outer
+        outer.Margin = Thickness(20, 4, 8, 16)
+        outer.Padding = Thickness(14, 12, 14, 12)
         outer.BorderThickness = Thickness(1, 1, 1, 1)
-        outer.CornerRadius = CornerRadiusHelper.FromUniformRadius(10)
+        outer.CornerRadius = CornerRadiusHelper.FromUniformRadius(12)
         outer.HorizontalAlignment = HorizontalAlignment.Stretch
-        outer.VerticalAlignment = VerticalAlignment.Center
+        outer.VerticalAlignment = VerticalAlignment.Stretch
         self._register_card(outer)
 
-        row = StackPanel()
-        row.Orientation = Orientation.Horizontal
-        row.HorizontalAlignment = HorizontalAlignment.Right
-        row.Spacing = 12
-        row.VerticalAlignment = VerticalAlignment.Center
+        root = Grid()
+        root.RowDefinitions.Append(self._row_auto())
+        root.RowDefinitions.Append(self._row_auto())
+        root.RowDefinitions.Append(self._row_auto())
+        root.VerticalAlignment = VerticalAlignment.Center
+
+        top = Grid()
+        top.Margin = Thickness(0, 0, 0, 2)
+        top.ColumnDefinitions.Append(self._col_star())
+        top.ColumnDefinitions.Append(self._col_px(40.0))
 
         balance_label = TextBlock()
-        balance_label.Text = "Balance"
-        balance_label.FontSize = 12
+        balance_label.Text = "SMS balance"
+        balance_label.FontSize = 11
         balance_label.VerticalAlignment = VerticalAlignment.Center
         self._balance_label = balance_label
+        Grid.SetColumn(balance_label, 0)
+
+        refresh = Button()
+        refresh.Content = SymbolIcon(Symbol.Refresh)
+        refresh.Width = 34
+        refresh.Height = 34
+        refresh.Padding = Thickness(0, 0, 0, 0)
+        refresh.HorizontalAlignment = HorizontalAlignment.Right
+        refresh.VerticalAlignment = VerticalAlignment.Top
+        refresh.add_Click(self._on_refresh_balance)
+        Grid.SetColumn(refresh, 1)
+
+        top.Children.Append(balance_label)
+        top.Children.Append(refresh)
+        Grid.SetRow(top, 0)
+        root.Children.Append(top)
 
         self._balance_text = TextBlock()
         self._balance_text.Text = "—"
-        self._balance_text.FontSize = 13
+        self._balance_text.FontSize = 22
         self._balance_text.FontWeight = FontWeights.SemiBold
-        self._balance_text.VerticalAlignment = VerticalAlignment.Center
+        self._balance_text.Margin = Thickness(0, 0, 0, 8)
+        Grid.SetRow(self._balance_text, 1)
+        root.Children.Append(self._balance_text)
 
-        refresh = Button()
-        refresh.Content = "Refresh"
-        refresh.MinWidth = 88
-        refresh.VerticalAlignment = VerticalAlignment.Center
-        refresh.add_Click(self._on_refresh_balance)
-
-        divider = Border()
-        divider.Width = 1
-        divider.Height = 18
-        divider.Margin = Thickness(2, 0, 2, 0)
-        divider.VerticalAlignment = VerticalAlignment.Center
-        self._account_divider = divider
+        pill = Border()
+        self._status_pill = pill
+        pill.Padding = Thickness(10, 5, 10, 5)
+        pill.BorderThickness = Thickness(1, 1, 1, 1)
+        pill.CornerRadius = CornerRadiusHelper.FromUniformRadius(8)
+        pill.HorizontalAlignment = HorizontalAlignment.Left
 
         self._api_dot = Ellipse()
-        self._api_dot.Width = 9
-        self._api_dot.Height = 9
+        self._api_dot.Width = 8
+        self._api_dot.Height = 8
         self._api_dot.VerticalAlignment = VerticalAlignment.Center
-        self._api_dot.Opacity = 1.0
 
         self._api_status_text = TextBlock()
         self._api_status_text.Text = "Checking…"
-        self._api_status_text.FontSize = 12
+        self._api_status_text.FontSize = 11
         self._api_status_text.VerticalAlignment = VerticalAlignment.Center
 
         status_row = StackPanel()
         status_row.Orientation = Orientation.Horizontal
         status_row.Spacing = 6
-        status_row.VerticalAlignment = VerticalAlignment.Center
         status_row.Children.Append(self._api_dot)
         status_row.Children.Append(self._api_status_text)
+        pill.Child = status_row
 
-        row.Children.Append(balance_label)
-        row.Children.Append(self._balance_text)
-        row.Children.Append(refresh)
-        row.Children.Append(divider)
-        row.Children.Append(status_row)
+        Grid.SetRow(pill, 2)
+        root.Children.Append(pill)
 
-        outer.Child = row
+        outer.Child = root
         return outer
 
     def _centered_tab(self, inner: StackPanel) -> Grid:
@@ -1074,7 +1179,7 @@ class SafeSalesWinUIApp(XamlApplication):
         hint = TextBlock()
         self._contact_hint = hint
         hint.Text = (
-            "Creates a contact."
+            "Creates a contact.\n"
             "Phone number is required; name is optional."
         )
         hint.TextWrapping = TextWrapping.Wrap

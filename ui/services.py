@@ -141,15 +141,23 @@ def _shipment_courier_display(s: Shipment) -> str:
     return c
 
 
-# Inserted between shipment rows when the displayed courier changes.
-_SHIPMENT_COURIER_GROUP_SEP = "---------"
-
-
 def _clip_field(text: str, width: int) -> str:
     t = str(text).replace("\r", " ").replace("\n", " ")
     if len(t) <= width:
         return t.ljust(width)
     return t[: max(0, width - 1)] + "…"
+
+
+def _center_field(text: str, width: int) -> str:
+    t = str(text).replace("\r", " ").replace("\n", " ")
+    if len(t) > width:
+        t = t[: max(0, width - 1)] + "…"
+    return t.center(width)
+
+
+def _shipment_table_sep_line(wc: int, wi: int, wp: int) -> str:
+    """Full-width dashed rule aligned with Courier | ID | Phone columns."""
+    return "  | " + "-" * wc + " | " + "-" * wi + " | " + "-" * wp + " |"
 
 
 def _column_width(header: str, values: list[str], cap: int) -> int:
@@ -199,7 +207,7 @@ def render_shipments_table(shipments: list[Shipment], *, max_rows: int = 150) ->
     wp = _column_width("Phone", phones, cap_p)
 
     def data_line(courier: str, sid: str, phone: str) -> str:
-        cells = (_clip_field(courier, wc), _clip_field(sid, wi), _clip_field(phone, wp))
+        cells = (_center_field(courier, wc), _clip_field(sid, wi), _clip_field(phone, wp))
         return "  | " + " | ".join(cells) + " |"
 
     total = len(shipments)
@@ -212,7 +220,7 @@ def render_shipments_table(shipments: list[Shipment], *, max_rows: int = 150) ->
     for s in rows:
         cur = _shipment_courier_display(s)
         if prev is not None and cur != prev:
-            out.append(_SHIPMENT_COURIER_GROUP_SEP)
+            out.append(_shipment_table_sep_line(wc, wi, wp))
         out.append(data_line(cur, str(s.voucher), str(s.phone)))
         prev = cur
     if total > max_rows:
