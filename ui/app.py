@@ -53,11 +53,24 @@ from win32more.Microsoft.UI.Xaml.Media import FontFamily, MicaBackdrop, SolidCol
 from win32more.Microsoft.UI.Xaml.Shapes import Ellipse
 from win32more.Microsoft.Windows.Storage.Pickers import FileOpenPicker, PickFileResult, PickerLocationId
 from win32more.Windows.Foundation import AsyncStatus, TimeSpan
+from win32more.Windows.Graphics import SizeInt32
 from win32more.Windows.UI import Color
 from win32more.winui3 import XamlApplication
 
 from easysms import EasySMSError
 from ui import services
+
+# Initial window client size (DIPs). Main content reflows instead of scaling.
+_INITIAL_CLIENT_W = 1200
+_INITIAL_CLIENT_H = 720
+# When the workspace grid is narrower than this, main + side stack vertically.
+_WORKSPACE_STACK_BREAKPOINT = 920.0
+# Wide layout: fixed width for the right column (Orders status / SMS contacts / Settings about).
+_WORKSPACE_SIDE_COL_WIDE = 440.0
+# Space between scrollable content and the vertical scrollbar (DIPs).
+_SCROLLVIEW_RIGHT_GUTTER = 18.0
+# EasySMS sender IDs offered in SMS + bulk-send pickers.
+_SENDER_ID_OPTIONS = ("SAFESALES", "DIVERSITY", "TINYCOCOON")
 
 
 def _ts() -> str:
@@ -129,9 +142,9 @@ class SafeSalesWinUIApp(XamlApplication):
         self._nav_item_orders: NavigationViewItem | None = None
         self._nav_item_settings: NavigationViewItem | None = None
         self._page_host: Grid | None = None
-        self._page_sms: ScrollViewer | None = None
-        self._page_orders: ScrollViewer | None = None
-        self._page_settings: ScrollViewer | None = None
+        self._page_sms: Grid | None = None
+        self._page_orders: Grid | None = None
+        self._page_settings: Grid | None = None
         self._current_route: str = "sms"
         self._nav_header_title: TextBlock | None = None
         self._nav_header_subtitle: TextBlock | None = None
@@ -153,21 +166,30 @@ class SafeSalesWinUIApp(XamlApplication):
         self._pulse_timer = None
         self._pulse_phase = True
 
-        self._log_box: TextBox | None = None
+        self._log_scroll: ScrollViewer | None = None
+        self._log_text: TextBlock | None = None
         self._acs_path = ""
         self._box_path = ""
         self._acs_path_box: TextBox | None = None
         self._box_path_box: TextBox | None = None
-        self._excel_results: TextBox | None = None
+        self._excel_files_scroll: ScrollViewer | None = None
+        self._excel_files_text: TextBlock | None = None
+        self._excel_shipments_scroll: ScrollViewer | None = None
+        self._excel_shipments_text: TextBlock | None = None
         self._excel_template: TextBox | None = None
-        self._excel_sender: TextBox | None = None
+        self._excel_sender: ComboBox | None = None
         self._last_shipments: list = []
         self._progress: ProgressRing | None = None
 
         self._sms_phone: TextBox | None = None
         self._sms_message: TextBox | None = None
-        self._sms_sender: TextBox | None = None
+        self._sms_sender: ComboBox | None = None
         self._sms_status: TextBlock | None = None
+        self._contact_name: TextBox | None = None
+        self._contact_mobile: TextBox | None = None
+        self._contact_status: TextBlock | None = None
+        self._contact_hint: TextBlock | None = None
+        self._contact_add_btn: Button | None = None
 
         self._pick_target: str | None = None
 
@@ -235,8 +257,46 @@ class SafeSalesWinUIApp(XamlApplication):
         nav.Header = self._build_top_header()
         nav.Content = page_host
         nav.SelectedItem = ni_sms
-        nav.SelectionChanged += self._on_nav_selection_changed
-        nav.ItemInvoked += self._on_nav_item_invoked
+
+        # Register each nav event once only — using both add_* and += doubled
+        # handlers and duplicated log lines.
+        add_sel = getattr(nav, "add_SelectionChanged", None)
+        if callable(add_sel):
+            try:
+                add_sel(self._on_nav_selection_changed)
+            except Exception:  # noqa: BLE001
+                try:
+                    nav.SelectionChanged += self._on_nav_selection_changed
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            try:
+                nav.SelectionChanged += self._on_nav_selection_changed
+            except Exception:  # noqa: BLE001
+                pass
+        add_inv = getattr(nav, "add_ItemInvoked", None)
+        if callable(add_inv):
+            try:
+                add_inv(self._on_nav_item_invoked)
+            except Exception:  # noqa: BLE001
+                try:
+                    nav.ItemInvoked += self._on_nav_item_invoked
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            try:
+                nav.ItemInvoked += self._on_nav_item_invoked
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Per-item Tapped fallback — guaranteed to fire on click even if the
+        # NavigationView selection events don't surface through win32more.
+        for ni, route in (
+            (ni_sms, "sms"),
+            (ni_orders, "orders"),
+            (ni_settings, "settings"),
+        ):
+            self._wire_item_tap(ni, route)
 
         Grid.SetRow(nav, 0)
         root.Children.Append(nav)
@@ -249,13 +309,9 @@ class SafeSalesWinUIApp(XamlApplication):
         log_wrap.CornerRadius = CornerRadiusHelper.FromUniformRadius(12)
         self._themed_borders.append(log_wrap)
 
-        log_stack = StackPanel()
-        log_stack.Orientation = Orientation.Vertical
-        log_stack.Spacing = 8
-
-        log_header_row = StackPanel()
-        log_header_row.Orientation = Orientation.Horizontal
-        log_header_row.Spacing = 8
+        log_inner = Grid()
+        log_inner.RowDefinitions.Append(self._row_auto())
+        log_inner.RowDefinitions.Append(self._row_star())
 
         log_header = TextBlock()
         self._log_header = log_header
@@ -263,21 +319,30 @@ class SafeSalesWinUIApp(XamlApplication):
         log_header.FontSize = 13
         log_header.FontWeight = FontWeights.SemiBold
         log_header.VerticalAlignment = VerticalAlignment.Center
+        Grid.SetRow(log_header, 0)
 
-        log_header_row.Children.Append(log_header)
+        log_tb = TextBlock()
+        self._log_text = log_tb
+        log_tb.TextWrapping = TextWrapping.Wrap
+        log_tb.FontFamily = FontFamily("Cascadia Mono,Consolas")
+        log_tb.FontSize = 12
+        log_tb.IsTextSelectionEnabled = True
+        log_tb.HorizontalAlignment = HorizontalAlignment.Stretch
 
-        self._log_box = TextBox()
-        self._log_box.IsReadOnly = True
-        self._log_box.AcceptsReturn = True
-        self._log_box.TextWrapping = TextWrapping.Wrap
-        self._log_box.FontFamily = FontFamily("Cascadia Mono,Consolas")
-        self._log_box.FontSize = 12
-        self._log_box.BorderThickness = Thickness(0, 0, 0, 0)
-        self._log_box.MinHeight = 108
+        log_sv = ScrollViewer()
+        self._log_scroll = log_sv
+        log_sv.Content = self._scrollviewer_content_inset(log_tb)
+        log_sv.HorizontalScrollMode = ScrollMode.Disabled
+        log_sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        log_sv.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        log_sv.VerticalAlignment = VerticalAlignment.Stretch
+        log_sv.MinHeight = 56
+        log_sv.MaxHeight = 96
+        Grid.SetRow(log_sv, 1)
 
-        log_stack.Children.Append(log_header_row)
-        log_stack.Children.Append(self._log_box)
-        log_wrap.Child = log_stack
+        log_inner.Children.Append(log_header)
+        log_inner.Children.Append(log_sv)
+        log_wrap.Child = log_inner
 
         Grid.SetRow(log_wrap, 1)
         root.Children.Append(log_wrap)
@@ -286,6 +351,7 @@ class SafeSalesWinUIApp(XamlApplication):
 
         self._window.Content = root
         self._window.Activate()
+        self._apply_initial_window_size()
 
         self._setup_pulse_timer()
         self._apply_theme_request(update_combo=True, defer=False)
@@ -347,20 +413,28 @@ class SafeSalesWinUIApp(XamlApplication):
             tb = getattr(self, ref_name, None)
             if tb is not None:
                 tb.Foreground = _rgb(255, *p.primary)
-        if self._log_box is not None:
-            self._log_box.Foreground = _rgb(255, *p.primary)
-            self._log_box.Background = _rgb(255, *p.surface)
-        if self._excel_results is not None:
-            self._excel_results.Foreground = _rgb(255, *p.primary)
-            self._excel_results.Background = _rgb(255, *p.card)
+        if self._log_text is not None:
+            self._log_text.Foreground = _rgb(255, *p.primary)
+            self._log_text.Background = _rgb(255, *p.surface)
+        for tb in (getattr(self, "_excel_files_text", None), getattr(self, "_excel_shipments_text", None)):
+            if tb is not None:
+                tb.Foreground = _rgb(255, *p.primary)
+                tb.Background = _rgb(255, *p.card)
         if self._sms_status is not None:
             self._sms_status.Foreground = _rgb(255, *p.muted)
+        if self._contact_hint is not None:
+            self._contact_hint.Foreground = _rgb(255, *p.muted)
+        if self._contact_status is not None:
+            self._contact_status.Foreground = _rgb(255, *p.muted)
         if self._send_btn is not None:
             self._send_btn.Background = _rgb(255, *p.accent)
             self._send_btn.Foreground = _rgb(255, *p.on_accent)
         if self._bulk_btn is not None:
             self._bulk_btn.Background = _rgb(255, *p.accent)
             self._bulk_btn.Foreground = _rgb(255, *p.on_accent)
+        if self._contact_add_btn is not None:
+            self._contact_add_btn.Background = _rgb(255, *p.accent)
+            self._contact_add_btn.Foreground = _rgb(255, *p.on_accent)
 
     def _apply_theme_request(self, *, update_combo: bool, defer: bool) -> None:
         def work() -> None:
@@ -410,38 +484,53 @@ class SafeSalesWinUIApp(XamlApplication):
     def _resolve_nav_route(self, item) -> str | None:
         if item is None:
             return None
+        candidates = (
+            (self._nav_item_sms, "sms"),
+            (self._nav_item_orders, "orders"),
+            (self._nav_item_settings, "settings"),
+        )
+        # Identity check against cached references — most reliable across win32more
+        # bindings, where Tag/Content readback may not round-trip as a Python string.
+        for stored, route in candidates:
+            if stored is None:
+                continue
+            if stored is item:
+                return route
+            try:
+                if stored == item:
+                    return route
+            except Exception:  # noqa: BLE001
+                pass
         route_map = {
             "sms": "sms",
             "one-time sms": "sms",
             "orders": "orders",
             "settings": "settings",
         }
-        try:
-            tag = item.Tag
-        except Exception:  # noqa: BLE001
-            tag = None
-        if tag is not None:
-            route = str(tag).strip().lower()
-            mapped = route_map.get(route)
+        for attr in ("Tag", "Content"):
+            try:
+                value = getattr(item, attr)
+            except Exception:  # noqa: BLE001
+                value = None
+            if value is None:
+                continue
+            try:
+                key = str(value).strip().lower()
+            except Exception:  # noqa: BLE001
+                key = ""
+            mapped = route_map.get(key)
             if mapped is not None:
                 return mapped
+        # Last resort — some NavigationView bindings expose SelectedItem as the raw text.
         try:
-            content = item.Content
+            return route_map.get(str(item).strip().lower())
         except Exception:  # noqa: BLE001
-            content = None
-        if content is not None:
-            route = str(content).strip().lower()
-            mapped = route_map.get(route)
-            if mapped is not None:
-                return mapped
-        # In some NavigationView bindings, SelectedItem is the raw content string.
-        return route_map.get(str(item).strip().lower())
+            return None
 
     def _switch_nav_route(self, route: str, *, sync_selection: bool = True) -> None:
         nav = self._nav
         if nav is None or route not in ("sms", "orders", "settings"):
             return
-        self._current_route = route
 
         pages = {
             "sms": (self._page_sms, self._nav_item_sms, "One-time SMS", "Single recipient delivery"),
@@ -449,6 +538,9 @@ class SafeSalesWinUIApp(XamlApplication):
             "settings": (self._page_settings, self._nav_item_settings, "Settings", "Appearance and application preferences"),
         }
         active_page, active_item, header_title, header_subtitle = pages[route]
+
+        previous_route = self._current_route
+        self._current_route = route
 
         for key, (page, _item, _t, _s) in pages.items():
             if page is None:
@@ -465,6 +557,9 @@ class SafeSalesWinUIApp(XamlApplication):
             self._nav_header_title.Text = header_title
         if self._nav_header_subtitle is not None:
             self._nav_header_subtitle.Text = header_subtitle
+
+        if previous_route != route:
+            self._log(f"View: {header_title}")
 
     def _on_nav_selection_changed(self, sender, args) -> None:
         item = None
@@ -494,6 +589,27 @@ class SafeSalesWinUIApp(XamlApplication):
                 break
         if route is not None:
             self._switch_nav_route(route, sync_selection=True)
+
+    def _wire_item_tap(self, item, route: str) -> None:
+        """Attach a Tapped handler on a NavigationViewItem so menu clicks always
+        navigate even if the NavigationView-level selection events don't fire."""
+        if item is None:
+            return
+
+        def handler(_sender, _args, _route=route):
+            self._switch_nav_route(_route, sync_selection=True)
+
+        adder = getattr(item, "add_Tapped", None)
+        if callable(adder):
+            try:
+                adder(handler)
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            item.Tapped += handler
+        except Exception:  # noqa: BLE001
+            pass
 
     def _build_top_header(self) -> Grid:
         g = Grid()
@@ -561,6 +677,11 @@ class SafeSalesWinUIApp(XamlApplication):
         rd.Height = GridLengthHelper.FromPixels(h)
         return rd
 
+    def _row_auto(self) -> RowDefinition:
+        rd = RowDefinition()
+        rd.Height = GridLengthHelper.FromValueAndType(0.0, GridUnitType.Auto)
+        return rd
+
     def _register_card(self, b: Border) -> Border:
         self._themed_borders.append(b)
         return b
@@ -575,23 +696,154 @@ class SafeSalesWinUIApp(XamlApplication):
         b.MaxWidth = 1400
         return self._register_card(b)
 
+    def _scrollviewer_content_inset(self, inner) -> Border:
+        """Pad the right edge so the scrollbar does not overlap inputs / monospace text."""
+        b = Border()
+        b.Child = inner
+        b.Padding = Thickness(0, 0, _SCROLLVIEW_RIGHT_GUTTER, 0)
+        b.HorizontalAlignment = HorizontalAlignment.Stretch
+        return b
+
+    def _build_sender_id_combo(self) -> ComboBox:
+        c = ComboBox()
+        c.Header = "Sender (optional)"
+        c.MinWidth = 240
+        for name in _SENDER_ID_OPTIONS:
+            it = ComboBoxItem()
+            it.Content = name
+            c.Items.Append(it)
+        c.SelectedIndex = 0
+        return c
+
+    def _selected_sender_id(self, combo: ComboBox | None) -> str | None:
+        if combo is None:
+            return None
+        try:
+            idx = int(combo.SelectedIndex)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= idx < len(_SENDER_ID_OPTIONS):
+            return _SENDER_ID_OPTIONS[idx]
+        return None
+
+    def _card_scroll_host(self, inner: StackPanel) -> ScrollViewer:
+        """Let tall card bodies scroll inside the workspace (bounded height from grid star row)."""
+        inner.HorizontalAlignment = HorizontalAlignment.Stretch
+        sv = ScrollViewer()
+        sv.Content = self._scrollviewer_content_inset(inner)
+        sv.HorizontalAlignment = HorizontalAlignment.Stretch
+        sv.VerticalAlignment = VerticalAlignment.Stretch
+        sv.HorizontalScrollMode = ScrollMode.Disabled
+        sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        sv.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        return sv
+
     def _workspace(self, main_card: Border, side_card: Border | None = None) -> Grid:
+        """Main + optional side: two columns when wide, stacked when narrow (no uniform shrink)."""
         g = Grid()
-        c0 = ColumnDefinition()
-        c0.Width = GridLengthHelper.FromValueAndType(1.0, GridUnitType.Star)
-        g.ColumnDefinitions.Append(c0)
-        if side_card is not None:
-            c1 = ColumnDefinition()
-            c1.Width = GridLengthHelper.FromPixels(360)
-            g.ColumnDefinitions.Append(c1)
-        main_card.Margin = Thickness(20, 0, 12 if side_card is not None else 20, 0)
-        Grid.SetColumn(main_card, 0)
-        g.Children.Append(main_card)
-        if side_card is not None:
-            side_card.Margin = Thickness(12, 0, 20, 0)
-            Grid.SetColumn(side_card, 1)
+        g.HorizontalAlignment = HorizontalAlignment.Stretch
+        g.VerticalAlignment = VerticalAlignment.Stretch
+
+        def star_col() -> ColumnDefinition:
+            c = ColumnDefinition()
+            c.Width = GridLengthHelper.FromValueAndType(1.0, GridUnitType.Star)
+            return c
+
+        def px_col(w: float) -> ColumnDefinition:
+            c = ColumnDefinition()
+            c.Width = GridLengthHelper.FromPixels(w)
+            return c
+
+        def auto_row() -> RowDefinition:
+            r = RowDefinition()
+            r.Height = GridLengthHelper.FromValueAndType(0.0, GridUnitType.Auto)
+            return r
+
+        if side_card is None:
+            g.RowDefinitions.Append(self._row_star())
+            g.ColumnDefinitions.Append(star_col())
+            main_card.Margin = Thickness(20, 0, 20, 0)
+            Grid.SetRow(main_card, 0)
+            Grid.SetColumn(main_card, 0)
+            g.Children.Append(main_card)
+            return g
+
+        layout_narrow: list[bool | None] = [None]
+
+        def apply_layout(narrow: bool) -> None:
+            if layout_narrow[0] == narrow:
+                return
+            layout_narrow[0] = narrow
+            try:
+                g.Children.Clear()
+            except Exception:  # noqa: BLE001
+                return
+            try:
+                g.ColumnDefinitions.Clear()
+                g.RowDefinitions.Clear()
+            except Exception:  # noqa: BLE001
+                return
+            if narrow:
+                g.RowDefinitions.Append(self._row_star())
+                g.RowDefinitions.Append(auto_row())
+                g.ColumnDefinitions.Append(star_col())
+                main_card.Margin = Thickness(20, 0, 20, 10)
+                side_card.Margin = Thickness(20, 0, 20, 0)
+                Grid.SetRow(main_card, 0)
+                Grid.SetColumn(main_card, 0)
+                Grid.SetRow(side_card, 1)
+                Grid.SetColumn(side_card, 0)
+            else:
+                g.RowDefinitions.Append(self._row_star())
+                g.ColumnDefinitions.Append(star_col())
+                g.ColumnDefinitions.Append(px_col(_WORKSPACE_SIDE_COL_WIDE))
+                main_card.Margin = Thickness(20, 0, 12, 0)
+                side_card.Margin = Thickness(12, 0, 20, 0)
+                Grid.SetRow(main_card, 0)
+                Grid.SetColumn(main_card, 0)
+                Grid.SetRow(side_card, 0)
+                Grid.SetColumn(side_card, 1)
+            g.Children.Append(main_card)
             g.Children.Append(side_card)
+
+        def on_workspace_size_changed(sender, _args) -> None:
+            try:
+                w = float(sender.ActualWidth)
+            except Exception:  # noqa: BLE001
+                return
+            if w <= 1.0:
+                return
+            apply_layout(w < _WORKSPACE_STACK_BREAKPOINT)
+
+        g.SizeChanged += on_workspace_size_changed
+        apply_layout(False)
         return g
+
+    def _apply_initial_window_size(self) -> None:
+        """Reasonable default client size; content reflows when the window is resized."""
+        try:
+            sz = SizeInt32()
+            sz.Width = _INITIAL_CLIENT_W
+            sz.Height = _INITIAL_CLIENT_H
+            self._window.AppWindow.ResizeClient(sz)
+        except Exception:  # noqa: BLE001 — ResizeClient needs IAppWindow2 on some builds
+            try:
+                sz = SizeInt32()
+                sz.Width = _INITIAL_CLIENT_W
+                sz.Height = _INITIAL_CLIENT_H
+                self._window.AppWindow.Resize(sz)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _fill_page(self, padded_content) -> Grid:
+        """Stretch page content to the NavigationView area (no Viewbox scaling)."""
+        outer = Grid()
+        outer.HorizontalAlignment = HorizontalAlignment.Stretch
+        outer.VerticalAlignment = VerticalAlignment.Stretch
+        padded_content.HorizontalAlignment = HorizontalAlignment.Stretch
+        padded_content.VerticalAlignment = VerticalAlignment.Stretch
+        outer.Children.Append(padded_content)
+        return outer
 
     def _page_title(self, text: str, subtitle: str) -> tuple[StackPanel, TextBlock, TextBlock]:
         block = StackPanel()
@@ -621,12 +873,7 @@ class SafeSalesWinUIApp(XamlApplication):
         tb.Margin = Thickness(0, 6, 0, 2)
         return tb
 
-    def _build_settings_tab(self) -> ScrollViewer:
-        scroll = ScrollViewer()
-        scroll.HorizontalScrollMode = ScrollMode.Disabled
-        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-        scroll.Padding = Thickness(24, 24, 24, 32)
-
+    def _build_settings_tab(self) -> Grid:
         main = StackPanel()
         main.Spacing = 10
         main.Orientation = Orientation.Vertical
@@ -684,8 +931,14 @@ class SafeSalesWinUIApp(XamlApplication):
         side.Children.Append(side_title)
         side.Children.Append(side_body)
 
-        scroll.Content = self._workspace(self._card(main, pad=28), self._card(side, pad=20))
-        return scroll
+        content = self._workspace(
+            self._card(self._card_scroll_host(main), pad=28),
+            self._card(self._card_scroll_host(side), pad=20),
+        )
+        pad = Border()
+        pad.Padding = Thickness(24, 24, 24, 32)
+        pad.Child = content
+        return self._fill_page(pad)
 
     def _build_account_strip(self) -> Border:
         outer = Border()
@@ -767,12 +1020,7 @@ class SafeSalesWinUIApp(XamlApplication):
         g.Children.Append(card)
         return g
 
-    def _build_one_time_tab(self) -> ScrollViewer:
-        scroll = ScrollViewer()
-        scroll.HorizontalScrollMode = ScrollMode.Disabled
-        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-        scroll.Padding = Thickness(24, 24, 24, 32)
-
+    def _build_one_time_tab(self) -> Grid:
         panel = StackPanel()
         panel.Spacing = 14
         panel.Orientation = Orientation.Vertical
@@ -792,11 +1040,9 @@ class SafeSalesWinUIApp(XamlApplication):
         self._sms_message.Header = "Message"
         self._sms_message.AcceptsReturn = True
         self._sms_message.TextWrapping = TextWrapping.Wrap
-        self._sms_message.MinHeight = 128
+        self._sms_message.MinHeight = 96
 
-        self._sms_sender = TextBox()
-        self._sms_sender.Header = "Sender (optional)"
-        self._sms_sender.PlaceholderText = "Sender ID"
+        self._sms_sender = self._build_sender_id_combo()
 
         send_btn = Button()
         self._send_btn = send_btn
@@ -820,29 +1066,57 @@ class SafeSalesWinUIApp(XamlApplication):
         panel.Children.Append(self._sms_status)
 
         side = StackPanel()
-        side.Spacing = 8
+        side.Spacing = 10
         side.Orientation = Orientation.Vertical
 
-        side_title = TextBlock()
-        side_title.Text = "Tips"
-        side_title.FontSize = 15
-        side_title.FontWeight = FontWeights.SemiBold
+        side.Children.Append(self._section_header("Contacts"))
 
-        side_body = TextBlock()
-        side_body.Text = (
-            "• Use international number format when possible.\n"
-            "• Keep sender short for better carrier compatibility.\n"
-            "• Review the message before sending — SMS cannot be undone."
+        hint = TextBlock()
+        self._contact_hint = hint
+        hint.Text = (
+            "Creates a contact."
+            "Phone number is required; name is optional."
         )
-        side_body.TextWrapping = TextWrapping.Wrap
-        side_body.FontSize = 13
-        side_body.LineHeight = 20
+        hint.TextWrapping = TextWrapping.Wrap
+        hint.FontSize = 12
+        hint.LineHeight = 18
 
-        side.Children.Append(side_title)
-        side.Children.Append(side_body)
+        self._contact_mobile = TextBox()
+        self._contact_mobile.Header = "Phone (required)"
+        self._contact_mobile.PlaceholderText = "Mobile number"
 
-        scroll.Content = self._workspace(self._card(panel, pad=28), self._card(side, pad=20))
-        return scroll
+        self._contact_name = TextBox()
+        self._contact_name.Header = "Name (optional)"
+        self._contact_name.PlaceholderText = "Name"
+
+        add_contact_btn = Button()
+        self._contact_add_btn = add_contact_btn
+        add_contact_btn.Content = "Add contact"
+        add_contact_btn.MinWidth = 140
+        add_contact_btn.HorizontalAlignment = HorizontalAlignment.Left
+        add_contact_btn.Margin = Thickness(0, 2, 0, 0)
+        add_contact_btn.add_Click(self._on_add_contact)
+
+        self._contact_status = TextBlock()
+        self._contact_status.Text = ""
+        self._contact_status.TextWrapping = TextWrapping.Wrap
+        self._contact_status.FontSize = 12
+        self._contact_status.Margin = Thickness(0, 2, 0, 0)
+
+        side.Children.Append(hint)
+        side.Children.Append(self._contact_mobile)
+        side.Children.Append(self._contact_name)
+        side.Children.Append(add_contact_btn)
+        side.Children.Append(self._contact_status)
+
+        content = self._workspace(
+            self._card(self._card_scroll_host(panel), pad=28),
+            self._card(self._card_scroll_host(side), pad=20),
+        )
+        pad = Border()
+        pad.Padding = Thickness(24, 24, 24, 32)
+        pad.Child = content
+        return self._fill_page(pad)
 
     def _file_row(self, text_box: TextBox, button: Button) -> Grid:
         g = Grid()
@@ -860,12 +1134,26 @@ class SafeSalesWinUIApp(XamlApplication):
         g.Children.Append(button)
         return g
 
-    def _build_excel_tab(self) -> ScrollViewer:
-        scroll = ScrollViewer()
-        scroll.HorizontalScrollMode = ScrollMode.Disabled
-        scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-        scroll.Padding = Thickness(24, 24, 24, 32)
+    def _readonly_mono_scroll(self, *, max_h: float, min_h: float = 56.0) -> tuple[ScrollViewer, TextBlock]:
+        """ScrollViewer + TextBlock so ExtentHeight is correct and scrolling reaches the true bottom."""
+        tb = TextBlock()
+        tb.TextWrapping = TextWrapping.Wrap
+        tb.FontFamily = FontFamily("Cascadia Mono,Consolas")
+        tb.FontSize = 12
+        tb.IsTextSelectionEnabled = True
+        tb.Text = ""
+        tb.HorizontalAlignment = HorizontalAlignment.Stretch
 
+        sv = ScrollViewer()
+        sv.Content = self._scrollviewer_content_inset(tb)
+        sv.HorizontalScrollMode = ScrollMode.Disabled
+        sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        sv.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        sv.MinHeight = min_h
+        sv.MaxHeight = max_h
+        return sv, tb
+
+    def _build_excel_tab(self) -> Grid:
         panel = StackPanel()
         panel.Spacing = 12
         panel.Orientation = Orientation.Vertical
@@ -913,11 +1201,9 @@ class SafeSalesWinUIApp(XamlApplication):
         self._excel_template.PlaceholderText = "Hello {phone}, your shipment {voucher} is on the way."
         self._excel_template.TextWrapping = TextWrapping.Wrap
         self._excel_template.AcceptsReturn = True
-        self._excel_template.MinHeight = 84
+        self._excel_template.MinHeight = 64
 
-        self._excel_sender = TextBox()
-        self._excel_sender.Header = "Sender (optional)"
-        self._excel_sender.PlaceholderText = "Sender ID"
+        self._excel_sender = self._build_sender_id_combo()
 
         bulk_btn = Button()
         self._bulk_btn = bulk_btn
@@ -932,15 +1218,6 @@ class SafeSalesWinUIApp(XamlApplication):
         self._progress.Height = 24
         self._progress.IsActive = False
         self._progress.Visibility = Visibility.Collapsed
-
-        self._excel_results = TextBox()
-        self._excel_results.Header = "Results"
-        self._excel_results.IsReadOnly = True
-        self._excel_results.TextWrapping = TextWrapping.Wrap
-        self._excel_results.AcceptsReturn = True
-        self._excel_results.FontFamily = FontFamily("Cascadia Mono,Consolas")
-        self._excel_results.FontSize = 12
-        self._excel_results.MinHeight = 320
 
         panel.Children.Append(header)
         panel.Children.Append(files_header)
@@ -977,23 +1254,62 @@ class SafeSalesWinUIApp(XamlApplication):
 
         side.Children.Append(side_title)
         side.Children.Append(status_row)
-        side.Children.Append(self._excel_results)
+        side.Children.Append(self._section_header("Parsed files"))
+        self._excel_files_scroll, self._excel_files_text = self._readonly_mono_scroll(max_h=152.0, min_h=72.0)
+        side.Children.Append(self._excel_files_scroll)
+        side.Children.Append(self._section_header("Shipments"))
+        self._excel_shipments_scroll, self._excel_shipments_text = self._readonly_mono_scroll(max_h=280.0, min_h=96.0)
+        side.Children.Append(self._excel_shipments_scroll)
 
-        scroll.Content = self._workspace(self._card(panel, pad=28), self._card(side, pad=20))
-        return scroll
+        content = self._workspace(
+            self._card(self._card_scroll_host(panel), pad=28),
+            self._card(self._card_scroll_host(side), pad=20),
+        )
+        pad = Border()
+        pad.Padding = Thickness(24, 24, 24, 32)
+        pad.Child = content
+        return self._fill_page(pad)
 
     def _enqueue(self, fn, *, high: bool = False) -> None:
         prio = DispatcherQueuePriority.High if high else DispatcherQueuePriority.Normal
         self._dispatcher.TryEnqueueWithPriority(prio, fn)
 
+    def _scroll_sv_to_bottom(self, sv: ScrollViewer | None) -> None:
+        """Scroll a ScrollViewer to the bottom; run twice so layout has final Extent."""
+        if sv is None:
+            return
+
+        def apply() -> None:
+            try:
+                sv.UpdateLayout()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                y = float(sv.ScrollableHeight)
+                if y <= 0:
+                    y = max(0.0, float(sv.ExtentHeight) - float(sv.ViewportHeight))
+                sv.ScrollToVerticalOffset(y)
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._enqueue(apply, high=True)
+        try:
+            self._dispatcher.TryEnqueueWithPriority(DispatcherQueuePriority.Low, apply)
+        except Exception:  # noqa: BLE001
+            self._enqueue(apply)
+
+    def _scroll_log_to_end(self) -> None:
+        self._scroll_sv_to_bottom(self._log_scroll)
+
     def _log(self, message: str) -> None:
         line = f"[{_ts()}] {message}\n"
 
         def append():
-            if self._log_box is None:
+            if self._log_text is None:
                 return
-            cur = self._log_box.Text or ""
-            self._log_box.Text = (cur + line)[-120000:]
+            cur = self._log_text.Text or ""
+            self._log_text.Text = (cur + line)[-120000:]
+            self._scroll_log_to_end()
 
         if self._dispatcher.HasThreadAccess:
             append()
@@ -1051,7 +1367,7 @@ class SafeSalesWinUIApp(XamlApplication):
             return
         phone = (self._sms_phone.Text or "").strip()
         text = (self._sms_message.Text or "").strip()
-        sender_id = (self._sms_sender.Text or "").strip() or None
+        sender_id = self._selected_sender_id(self._sms_sender)
         if not phone or not text:
             self._sms_status.Text = "Number and message required."
             return
@@ -1079,6 +1395,56 @@ class SafeSalesWinUIApp(XamlApplication):
     def _finish_send_err(self, msg: str) -> None:
         self._sms_status.Text = msg
         self._log(f"Error: {msg}")
+
+    def _on_add_contact(self, sender, args) -> None:
+        client = self._client
+        st = self._contact_status
+        if st is not None:
+            st.Text = ""
+        if not client:
+            if st is not None:
+                st.Text = "Unavailable (set API_KEY)."
+            return
+        if self._contact_mobile is None:
+            return
+        mobile = (self._contact_mobile.Text or "").strip()
+        if not mobile:
+            if st is not None:
+                st.Text = "Phone number is required."
+            return
+        name = None
+        if self._contact_name is not None:
+            name = (self._contact_name.Text or "").strip() or None
+
+        if st is not None:
+            st.Text = "Adding…"
+
+        def worker():
+            try:
+                client.contact.add(mobile, name=name)
+                self._enqueue(lambda m=mobile: self._finish_contact_add_ok(m))
+            except EasySMSError as exc:
+                self._enqueue(lambda e=str(exc): self._finish_contact_add_err(e))
+            except OSError as exc:
+                self._enqueue(lambda e=str(exc): self._finish_contact_add_err(e))
+            except Exception as exc:  # noqa: BLE001
+                self._enqueue(lambda e=str(exc): self._finish_contact_add_err(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_contact_add_ok(self, mobile: str) -> None:
+        if self._contact_status is not None:
+            self._contact_status.Text = f"Added contact ({mobile})."
+        if self._contact_mobile is not None:
+            self._contact_mobile.Text = ""
+        if self._contact_name is not None:
+            self._contact_name.Text = ""
+        self._log(f"Contact added: {mobile}")
+
+    def _finish_contact_add_err(self, msg: str) -> None:
+        if self._contact_status is not None:
+            self._contact_status.Text = msg
+        self._log(f"Contact add error: {msg}")
 
     def _on_browse_acs(self, sender, args):
         self._pick_target = "acs"
@@ -1155,24 +1521,37 @@ class SafeSalesWinUIApp(XamlApplication):
                 result = services.process_excel_paths(paths)
             except Exception as exc:  # noqa: BLE001
                 tb = traceback.format_exc()
-                self._enqueue(lambda: self._finish_process(None, f"{exc}\n{tb}", f"{exc}\n{tb}"))
+                self._enqueue(lambda e=str(exc), tb=traceback.format_exc(): self._finish_process(None, "", f"{e}\n{tb}", f"{e}\n{tb}"))
                 return
 
-            panel = services.format_excel_results_panel(result.lines, result.shipments)
+            ft = services.format_parse_lines_display(result.lines)
+            st = services.render_shipments_table(result.shipments)
             lines = "\n".join(result.lines)
-            self._enqueue(lambda: self._finish_process(result.shipments, panel, lines))
+            self._enqueue(
+                lambda ft=ft, st=st, ship=result.shipments, ln=lines: self._finish_process(ship, ft, st, ln)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_process(self, shipments, results_text: str | None, log_block: str) -> None:
+    def _finish_process(
+        self,
+        shipments,
+        files_text: str | None,
+        shipments_text: str | None,
+        log_block: str,
+    ) -> None:
         self._set_progress(False)
         if shipments is not None:
             self._last_shipments = shipments
-        if self._excel_results is not None and results_text is not None:
-            self._excel_results.Text = results_text
+        if self._excel_files_text is not None:
+            self._excel_files_text.Text = files_text if files_text is not None else ""
+        if self._excel_shipments_text is not None:
+            self._excel_shipments_text.Text = shipments_text if shipments_text is not None else ""
+        self._scroll_sv_to_bottom(self._excel_files_scroll)
+        self._scroll_sv_to_bottom(self._excel_shipments_scroll)
         if shipments is not None:
             self._log("Done.")
-        elif results_text:
+        elif (shipments_text or "").strip() or (files_text or "").strip():
             self._log("Process failed.")
         for line in (log_block or "").splitlines():
             if line.strip():
@@ -1191,7 +1570,7 @@ class SafeSalesWinUIApp(XamlApplication):
             self._log("Message template empty.")
             return
 
-        sender_id = (self._excel_sender.Text or "").strip() or None
+        sender_id = self._selected_sender_id(self._excel_sender)
         self._log("Sending…")
         self._set_progress(True)
 

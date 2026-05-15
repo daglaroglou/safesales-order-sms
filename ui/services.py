@@ -131,10 +131,18 @@ def _carrier_label(s: Shipment) -> str:
     return str(c)
 
 
-def _source_basename(s: Shipment) -> str:
-    if not s.source_file:
-        return ""
-    return Path(s.source_file).name
+def _shipment_courier_display(s: Shipment) -> str:
+    """Short courier label for tables (box_express → BE)."""
+    c = _carrier_label(s)
+    if c == "box_express":
+        return "BE"
+    if c == "acs":
+        return "ACS"
+    return c
+
+
+# Inserted between shipment rows when the displayed courier changes.
+_SHIPMENT_COURIER_GROUP_SEP = "---------"
 
 
 def _clip_field(text: str, width: int) -> str:
@@ -144,50 +152,78 @@ def _clip_field(text: str, width: int) -> str:
     return t[: max(0, width - 1)] + "…"
 
 
+def _column_width(header: str, values: list[str], cap: int) -> int:
+    m = max(len(header), max((len(v) for v in values), default=0))
+    return min(cap, max(m, len(header)))
+
+
+def format_parse_lines_display(parse_lines: list[str]) -> str:
+    """Readable summary of each workbook line (ASCII-friendly)."""
+    if not parse_lines:
+        return (
+            "No files were processed in this run.\n\n"
+            "Choose ACS and/or Box Express .xlsx files, then tap Process files."
+        )
+    out: list[str] = []
+    out.append("WORKBOOKS")
+    out.append("=" * 46)
+    for raw in parse_lines:
+        line = (raw or "").strip()
+        if not line:
+            continue
+        if " · " in line:
+            name, detail = line.split(" · ", 1)
+            name, detail = name.strip(), detail.strip()
+            out.append("")
+            out.append(f"  *  {name}")
+            out.append(f"     {detail}")
+        else:
+            warn = any(k in line.lower() for k in ("skip", "error", "invalid", "unsupported"))
+            prefix = "[!] " if warn else "    "
+            out.append(f"  {prefix}{line}")
+    return "\n".join(out).rstrip() + "\n"
+
+
 def render_shipments_table(shipments: list[Shipment], *, max_rows: int = 150) -> str:
-    """Aligned column block for monospace display (no TSV)."""
+    """Three columns (Courier | ID | Phone); dashed line when displayed courier changes."""
     if not shipments:
         return "No shipment rows parsed."
     rows = shipments[:max_rows]
-    carriers = [_carrier_label(s) for s in rows]
-    vouchers = [str(s.voucher) for s in rows]
+    carriers = [_shipment_courier_display(s) for s in rows]
+    ids_ = [str(s.voucher) for s in rows]
     phones = [str(s.phone) for s in rows]
-    sources = [_source_basename(s) for s in rows]
-    w_c = min(14, max(len("Carrier"), max((len(x) for x in carriers), default=0)))
-    w_v = min(22, max(len("Voucher"), max((len(x) for x in vouchers), default=0)))
-    w_p = min(18, max(len("Phone"), max((len(x) for x in phones), default=0)))
-    w_s = min(40, max(len("Source"), max((len(x) for x in sources), default=0)))
+
+    cap_c, cap_i, cap_p = 8, 28, 18
+    wc = _column_width("Courier", carriers, cap_c)
+    wi = _column_width("ID", ids_, cap_i)
+    wp = _column_width("Phone", phones, cap_p)
+
+    def data_line(courier: str, sid: str, phone: str) -> str:
+        cells = (_clip_field(courier, wc), _clip_field(sid, wi), _clip_field(phone, wp))
+        return "  | " + " | ".join(cells) + " |"
+
+    total = len(shipments)
+    shown = len(rows)
     out: list[str] = []
-    out.append(
-        f"  {_clip_field('Carrier', w_c)}  {_clip_field('Voucher', w_v)}  "
-        f"{_clip_field('Phone', w_p)}  {_clip_field('Source', w_s)}"
-    )
-    out.append(f"  {'─' * w_c}  {'─' * w_v}  {'─' * w_p}  {'─' * w_s}")
+    out.append(f"  Rows: {total} total   (showing {shown} below)")
+    out.append("")
+    out.append(data_line("Courier", "ID", "Phone"))
+    prev: str | None = None
     for s in rows:
-        out.append(
-            f"  {_clip_field(_carrier_label(s), w_c)}  {_clip_field(str(s.voucher), w_v)}  "
-            f"{_clip_field(str(s.phone), w_p)}  {_clip_field(_source_basename(s), w_s)}"
-        )
-    if len(shipments) > max_rows:
-        out.append(f"  … and {len(shipments) - max_rows} more row(s) not shown.")
+        cur = _shipment_courier_display(s)
+        if prev is not None and cur != prev:
+            out.append(_SHIPMENT_COURIER_GROUP_SEP)
+        out.append(data_line(cur, str(s.voucher), str(s.phone)))
+        prev = cur
+    if total > max_rows:
+        out.append("")
+        out.append(f"  ... {total - max_rows} more row(s) not shown.")
     return "\n".join(out)
 
 
 def format_excel_results_panel(parse_lines: list[str], shipments: list[Shipment], *, max_rows: int = 150) -> str:
-    """Human-readable report for the Orders results text box."""
-    blocks: list[str] = []
-    blocks.append("Files")
-    blocks.append("─" * 58)
-    if parse_lines:
-        for ln in parse_lines:
-            blocks.append(f"  {ln}")
-    else:
-        blocks.append("  (nothing processed)")
-    blocks.append("")
-    blocks.append(f"Shipments  ({len(shipments)} row{'s' if len(shipments) != 1 else ''})")
-    blocks.append("─" * 58)
-    blocks.append(render_shipments_table(shipments, max_rows=max_rows))
-    return "\n".join(blocks)
+    """Full report string (activity log / legacy); UI uses split panels instead."""
+    return f"{format_parse_lines_display(parse_lines)}\n\n{render_shipments_table(shipments, max_rows=max_rows)}"
 
 
 def render_shipments_summary(shipments: list[Shipment], *, max_rows: int = 80) -> str:
