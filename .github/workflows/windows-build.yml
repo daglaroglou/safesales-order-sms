@@ -126,6 +126,7 @@ jobs:
           Copy-Item -Path $exeInDist -Destination $exeOut -Force
 
       - name: Compute release metadata
+        if: github.event_name == 'workflow_dispatch'
         id: release-info
         shell: pwsh
         run: |
