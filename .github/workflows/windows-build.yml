@@ -152,13 +152,13 @@ jobs:
             if (-not $commitList) {
               $commitList = "No commits since $prevTag."
             }
-            $body = "Commits since $prevTag:`n`n$commitList"
+            $body = "Commits since ${prevTag}`n`n${commitList}"
           } else {
             $commitList = git log --pretty=format:'- %s (%h)'
             if (-not $commitList) {
               $commitList = "No commits available."
             }
-            $body = "Commits:`n`n$commitList"
+            $body = "No previous release tag found.`n`nCommits in repository:`n`n${commitList}"
           }
 
           echo "release_title=$title" >> $env:GITHUB_OUTPUT
