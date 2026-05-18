@@ -11,6 +11,10 @@ on:
         description: "Artifact retention (days)"
         required: true
         default: "14"
+      release-tag:
+        description: "Release tag name to create (e.g. v1.0.0)"
+        required: true
+        default: ""
   pull_request:
     branches: ["**"]
   push:
@@ -73,6 +77,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          tags: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -118,6 +125,47 @@ jobs:
           }
           Copy-Item -Path $exeInDist -Destination $exeOut -Force
 
+      - name: Compute release metadata
+        id: release-info
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.release-tag }}"
+          if (-not $tag) {
+            throw "release-tag is required"
+          }
+          git fetch --tags --prune
+          $prevTag = $null
+          try {
+            $prevTag = git describe --tags --abbrev=0 --match 'v*' 2>$null
+          } catch {
+            $prevTag = $null
+          }
+
+          if ($tag -notmatch '^v') {
+            $title = "Release v$tag"
+          } else {
+            $title = "Release $tag"
+          }
+
+          if ($prevTag) {
+            $commitList = git log $prevTag..HEAD --pretty=format:'- %s (%h)'
+            if (-not $commitList) {
+              $commitList = "No commits since $prevTag."
+            }
+            $body = "Commits since $prevTag:`n`n$commitList"
+          } else {
+            $commitList = git log --pretty=format:'- %s (%h)'
+            if (-not $commitList) {
+              $commitList = "No commits available."
+            }
+            $body = "Commits:`n`n$commitList"
+          }
+
+          echo "release_title=$title" >> $env:GITHUB_OUTPUT
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "release_body<<EOF"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $body
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "EOF"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -140,8 +188,20 @@ jobs:
           | Run URL | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
+      - name: Create GitHub release for workflow dispatch
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release-tag }}
+          name: ${{ steps.release-info.outputs.release_title }}
+          body: ${{ steps.release-info.outputs.release_body }}
+          files: |
+            release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Publish release assets (tags only)
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           files: |
