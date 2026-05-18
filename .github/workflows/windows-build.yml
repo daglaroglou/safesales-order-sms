@@ -96,7 +96,7 @@ jobs:
             --clean `
             --windowed `
             --onefile `
-            --name "Safesales-SMS" `
+            --name "${env:APP_NAME}" `
             --version-file packaging/windows_version_info.txt `
             --collect-submodules win32more `
             --collect-binaries win32more `
