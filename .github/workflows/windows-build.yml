@@ -126,14 +126,17 @@ jobs:
           Copy-Item -Path $exeInDist -Destination $exeOut -Force
 
       - name: Compute release metadata
-        if: github.event_name == 'workflow_dispatch'
         id: release-info
         shell: pwsh
         run: |
-          $tag = "${{ github.event.inputs.release-tag }}"
-          if (-not $tag) {
-            throw "release-tag is required"
+          $tag = ""
+          if ("${{ github.event_name }}" -eq 'workflow_dispatch') {
+            $tag = "${{ github.event.inputs.release-tag }}"
           }
+          elseif ("${{ github.ref_type }}" -eq 'tag') {
+            $tag = "${{ github.ref_name }}"
+          }
+
           git fetch --tags --prune
           $prevTag = $null
           try {
@@ -142,26 +145,36 @@ jobs:
             $prevTag = $null
           }
 
-          if ($tag -notmatch '^v') {
-            $title = "Release v$tag"
-          } else {
-            $title = "Release $tag"
-          }
-
-          if ($prevTag) {
-            $commitList = git log $prevTag..HEAD --pretty=format:'- %s (%h)'
-            if (-not $commitList) {
-              $commitList = "No commits since $prevTag."
+          if ($tag) {
+            if ($tag -notmatch '^v') {
+              $title = "Release v$tag"
+            } else {
+              $title = "Release $tag"
             }
-            $body = "Commits since ${prevTag}`n`n${commitList}"
+
+            if ($prevTag) {
+              $commitList = git log $prevTag..HEAD --pretty=format:'- %s (%h)'
+              if (-not $commitList) {
+                $commitList = "No commits since $prevTag."
+              }
+              $body = "Commits since ${prevTag}`n`n${commitList}"
+            } else {
+              $commitList = git log --pretty=format:'- %s (%h)'
+              if (-not $commitList) {
+                $commitList = "No commits available."
+              }
+              $body = "No previous release tag found.`n`nCommits in repository:`n`n${commitList}"
+            }
           } else {
-            $commitList = git log --pretty=format:'- %s (%h)'
+            $title = "Build ${env:GITHUB_SHA}" 
+            $commitList = git log --pretty=format:'- %s (%h)' -n 20
             if (-not $commitList) {
               $commitList = "No commits available."
             }
-            $body = "No previous release tag found.`n`nCommits in repository:`n`n${commitList}"
+            $body = "No release tag available for this run.`n`nLatest commits:`n`n${commitList}"
           }
 
+          echo "release_tag=$tag" >> $env:GITHUB_OUTPUT
           echo "release_title=$title" >> $env:GITHUB_OUTPUT
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_body<<EOF"
           Add-Content -Path $env:GITHUB_OUTPUT -Value $body
@@ -174,6 +187,35 @@ jobs:
           path: release/*
           if-no-files-found: error
           retention-days: ${{ fromJSON(inputs.artifact-retention-days || '14') }}
+
+      - name: Create Git tag for workflow dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.release-tag }}"
+          if (-not $tag) {
+            throw "release-tag is required for workflow_dispatch"
+          }
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          if (-not (git tag --list $tag)) {
+            git tag $tag
+            git push origin $tag
+          } else {
+            Write-Host "Tag $tag already exists; skipping creation."
+          }
+
+      - name: Create GitHub release
+        if: steps.release-info.outputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release-info.outputs.release_tag }}
+          name: ${{ steps.release-info.outputs.release_title }}
+          body: ${{ steps.release-info.outputs.release_body }}
+          files: |
+            release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build summary
         shell: pwsh
@@ -189,21 +231,3 @@ jobs:
           | Run URL | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-      - name: Create GitHub release for workflow dispatch
-        if: github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release-tag }}
-          name: ${{ steps.release-info.outputs.release_title }}
-          body: ${{ steps.release-info.outputs.release_body }}
-          files: |
-            release/*.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish release assets (tags only)
-        if: github.event_name == 'workflow_dispatch'
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/*.exe
