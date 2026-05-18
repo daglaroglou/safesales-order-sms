@@ -189,13 +189,10 @@ jobs:
           retention-days: ${{ fromJSON(inputs.artifact-retention-days || '14') }}
 
       - name: Create Git tag for workflow dispatch
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.release-tag != ''
         shell: pwsh
         run: |
           $tag = "${{ github.event.inputs.release-tag }}"
-          if (-not $tag) {
-            throw "release-tag is required for workflow_dispatch"
-          }
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
           if (-not (git tag --list $tag)) {
