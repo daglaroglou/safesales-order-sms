@@ -95,9 +95,12 @@ jobs:
             --noconfirm `
             --clean `
             --windowed `
-            --onedir `
-            --name "${env:APP_NAME}" `
+            --onefile `
+            --name "Safesales-SMS" `
+            --version-file packaging/windows_version_info.txt `
             --collect-submodules win32more `
+            --collect-binaries win32more `
+            --collect-data win32more `
             --collect-submodules easysms `
             --collect-submodules excel `
             --collect-submodules ui `
@@ -107,21 +110,13 @@ jobs:
         shell: pwsh
         run: |
           $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "sha-${{ github.sha }}".Substring(0, 11) }
-          $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss 'UTC'")
-          $outRoot = "${env:DIST_DIR}/${env:APP_NAME}"
           New-Item -ItemType Directory -Path "release" -Force | Out-Null
-          Set-Content -Path "$outRoot/VERSION.txt" -Value $version
-          Set-Content -Path "$outRoot/BUILD_INFO.txt" -Value @(
-            "App: ${env:APP_NAME}"
-            "Version: $version"
-            "Commit: ${{ github.sha }}"
-            "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            "Built at: $stamp"
-          )
-          Compress-Archive -Path "$outRoot/*" -DestinationPath "release/${env:APP_NAME}-windows-$version.zip" -Force
-          Get-FileHash "release/${env:APP_NAME}-windows-$version.zip" -Algorithm SHA256 | `
-            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path.Split('\')[-1])" } | `
-            Set-Content "release/${env:APP_NAME}-windows-$version.sha256"
+          $exeInDist = "${env:DIST_DIR}/${env:APP_NAME}.exe"
+          $exeOut = "release/${env:APP_NAME}-windows-$version.exe"
+          if (-not (Test-Path $exeInDist)) {
+            throw "Expected PyInstaller output not found: $exeInDist"
+          }
+          Copy-Item -Path $exeInDist -Destination $exeOut -Force
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -134,16 +129,14 @@ jobs:
       - name: Build summary
         shell: pwsh
         run: |
-          $zip = Get-ChildItem release/*.zip | Select-Object -First 1
-          $sha = Get-Content (Get-ChildItem release/*.sha256 | Select-Object -First 1)
+          $exe = Get-ChildItem release/*.exe | Select-Object -First 1
           @"
           ## Windows build completed
 
           | Output | Value |
           |---|---|
-          | File | $($zip.Name) |
-          | Size | $([math]::Round($zip.Length / 1MB, 2)) MB |
-          | SHA256 | `$sha` |
+          | File | $($exe.Name) |
+          | Size | $([math]::Round($exe.Length / 1MB, 2)) MB |
           | Run URL | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
@@ -152,5 +145,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/*.zip
-            release/*.sha256
+            release/*.exe

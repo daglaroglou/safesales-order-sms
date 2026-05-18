@@ -1,0 +1,45 @@
+# UTF-8
+#
+# Windows EXE metadata embedded by PyInstaller.
+#
+# Edit this file manually before pushing if you want to change what Windows
+# shows in: Properties -> Details (Product name, Company, File version, ...).
+#
+# Notes:
+# - `filevers` / `prodvers` must be 4 integers: (major, minor, patch, build)
+# - `FileVersion` / `ProductVersion` strings should typically match those tuples.
+# - Keep `OriginalFilename` aligned with the built exe name in `dist/`.
+#
+VSVersionInfo(
+    ffi=FixedFileInfo(
+        filevers=(1, 0, 0, 0),
+        prodvers=(1, 0, 0, 0),
+        mask=0x3F,
+        flags=0x0,
+        OS=0x40004,
+        fileType=0x1,
+        subtype=0x0,
+        date=(0, 0),
+    ),
+    kids=[
+        StringFileInfo(
+            [
+                StringTable(
+                    "040904B0",
+                    [
+                        StringStruct("CompanyName", "SafeSales"),
+                        StringStruct("FileDescription", "SafeSales-SMS"),
+                        StringStruct("FileVersion", "1.0.0.0"),
+                        StringStruct("InternalName", "Safesales-SMS"),
+                        StringStruct("LegalCopyright", "Copyright (c) 2026"),
+                        StringStruct("OriginalFilename", "Safesales-SMS.exe"),
+                        StringStruct("ProductName", "SafeSales SMS"),
+                        StringStruct("ProductVersion", "1.0.0.0"),
+                        StringStruct("Comments", "Requires Windows App Runtime 2.x"),
+                    ],
+                )
+            ]
+        ),
+        VarFileInfo([VarStruct("Translation", [1033, 1200])]),
+    ],
+)
