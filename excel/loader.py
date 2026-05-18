@@ -23,14 +23,23 @@ def detect_parser(path: Path) -> str | None:
     return None
 
 
-def parse_excel_file(path: Path | str) -> list[Shipment]:
+def parse_excel_file(
+    path: Path | str,
+    *,
+    export_directory: Path | str | None = None,
+) -> list[Shipment]:
     source = Path(path)
     parser = detect_parser(source)
+    export_dir = Path(export_directory) if export_directory is not None else source.parent
 
     if parser == "acs":
-        return parse_acs_file(source)
+        from excel.utils import acs_output_path
+
+        return parse_acs_file(source, output_path=acs_output_path(export_dir))
     if parser == "box_express":
-        return parse_box_express_file(source)
+        from excel.utils import box_express_output_path
+
+        return parse_box_express_file(source, output_path=box_express_output_path(export_dir))
 
     raise ValueError(f"Unsupported Excel file: {source.name}")
 

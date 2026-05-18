@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import traceback
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+from typing import Any
 
 try:
     import dotenv as _dotenv
@@ -14,7 +16,18 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from easysms import EasySMSClient, EasySMSError
 from excel.loader import parse_excel_file
-from excel.models import Shipment
+from excel.models import Carrier, Shipment
+from excel.utils import format_export_date
+from ui.config import get_export_directory
+
+ACS_TRACKING_SMS_TEMPLATE = (
+    "H αποστολή σας έχει γίνει με ACS Courier και αριθμό αποστολής [[custom1]]. "
+    "Αναζήτηση αποστολής στο https://www.acscourier.net/el/track-and-trace/"
+)
+BOX_EXPRESS_TRACKING_SMS_TEMPLATE = (
+    "H αποστολή σας έχει γίνει με BOX EXPRESS COURIER και αριθμό αποστολής [[custom1]]. "
+    "Αναζήτηση αποστολής στο https://boxexpress.gr/tracking"
+)
 
 
 def load_dotenv_if_present() -> None:
@@ -100,9 +113,15 @@ class ProcessResult:
     lines: list[str]
 
 
-def process_excel_paths(paths: list[Path]) -> ProcessResult:
+def process_excel_paths(
+    paths: list[Path],
+    *,
+    export_directory: Path | None = None,
+) -> ProcessResult:
     lines: list[str] = []
     all_shipments: list[Shipment] = []
+    export_dir = export_directory or get_export_directory()
+    lines.append(f"Export folder  ·  {export_dir}")
 
     for path in paths:
         if not path or not str(path).strip():
@@ -112,7 +131,7 @@ def process_excel_paths(paths: list[Path]) -> ProcessResult:
             if not p.is_file():
                 lines.append(f"{p.name}  ·  skipped (not a file)")
                 continue
-            shipments = parse_excel_file(p)
+            shipments = parse_excel_file(p, export_directory=export_dir)
             all_shipments.extend(shipments)
             lines.append(f"{p.name}  ·  {len(shipments)} shipment{'s' if len(shipments) != 1 else ''} parsed")
         except ValueError as exc:
@@ -135,7 +154,7 @@ def _shipment_courier_display(s: Shipment) -> str:
     """Short courier label for tables (box_express → BE)."""
     c = _carrier_label(s)
     if c == "box_express":
-        return "BE"
+        return "B.E"
     if c == "acs":
         return "ACS"
     return c
@@ -249,6 +268,188 @@ def format_message_template(template: str, shipment: Shipment) -> str:
     )
 
 
+def tracking_template_for_carrier(carrier: Carrier) -> str:
+    if carrier == Carrier.ACS:
+        return ACS_TRACKING_SMS_TEMPLATE
+    if carrier == Carrier.BOX_EXPRESS:
+        return BOX_EXPRESS_TRACKING_SMS_TEMPLATE
+    raise ValueError(f"unsupported carrier: {carrier}")
+
+
+def format_tracking_message(template: str, voucher: str) -> str:
+    return template.replace("[[custom1]]", voucher)
+
+
+def carrier_group_name(carrier: Carrier, on_date: date | None = None) -> str:
+    """Match trimmed export filenames: ``18-5-2026.xlsx`` / ``18-5-2026be.xlsx``."""
+    base = format_export_date(on_date)
+    if carrier == Carrier.BOX_EXPRESS:
+        return f"{base}be"
+    return base
+
+
+def _unwrap_entity_list(node: Any, singular: str) -> list[dict[str, Any]]:
+    if node is None:
+        return []
+    if isinstance(node, list):
+        return [item for item in node if isinstance(item, dict)]
+    if isinstance(node, dict):
+        inner = node.get(singular)
+        if inner is None:
+            return [node]
+        return _unwrap_entity_list(inner, singular)
+    return []
+
+
+def _groups_from_list_response(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    return _unwrap_entity_list(data.get("groups"), "group")
+
+
+def _contacts_from_list_response(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        return []
+    return _unwrap_entity_list(data.get("contacts"), "contact")
+
+
+def _response_id(response: Any, key: str) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    value = response.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _easysms_error_code(exc: EasySMSError) -> str | int | None:
+    return exc.error
+
+
+def _find_group_id_by_name(client: EasySMSClient, name: str) -> str | None:
+    data = client.group.list()
+    for group in _groups_from_list_response(data):
+        if str(group.get("name") or "").strip() == name:
+            gid = group.get("groupId")
+            if gid is not None:
+                return str(gid)
+    return None
+
+
+def ensure_group(client: EasySMSClient, name: str) -> str:
+    existing = _find_group_id_by_name(client, name)
+    if existing:
+        return existing
+    created = client.group.add(name)
+    group_id = _response_id(created, "groupId")
+    if not group_id:
+        raise EasySMSError(f"group/add did not return groupId for {name!r}", response=created)
+    return group_id
+
+
+def _build_contact_index(client: EasySMSClient) -> dict[str, str]:
+    data = client.contact.list()
+    index: dict[str, str] = {}
+    for contact in _contacts_from_list_response(data):
+        mobile = contact.get("mobile")
+        contact_id = contact.get("contactId")
+        if mobile is None or contact_id is None:
+            continue
+        index[str(mobile).strip()] = str(contact_id)
+    return index
+
+
+def ensure_contact_id(
+    client: EasySMSClient,
+    mobile: str,
+    contact_index: dict[str, str],
+    *,
+    custom1: str | None = None,
+    name: str | None = None,
+) -> str:
+    phone = mobile.strip()
+    cached = contact_index.get(phone)
+    if cached:
+        return cached
+
+    try:
+        created = client.contact.add(phone, name=name, custom1=custom1)
+    except EasySMSError as exc:
+        if str(_easysms_error_code(exc)) != "202":
+            raise
+        for contact in _contacts_from_list_response(client.contact.list()):
+            if str(contact.get("mobile") or "").strip() == phone:
+                contact_id = contact.get("contactId")
+                if contact_id is not None:
+                    contact_index[phone] = str(contact_id)
+                    return str(contact_id)
+        raise
+
+    contact_id = _response_id(created, "contactId")
+    if not contact_id:
+        raise EasySMSError(f"contact/add did not return contactId for {phone!r}", response=created)
+    contact_index[phone] = contact_id
+    return contact_id
+
+
+def add_contact_to_group(client: EasySMSClient, group_id: str, contact_id: str) -> None:
+    try:
+        client.group.add_contact(group_id, contact_id)
+    except EasySMSError as exc:
+        # 218: contact already in group — treat as success
+        if str(_easysms_error_code(exc)) == "218":
+            return
+        raise
+
+
+def populate_carrier_group(
+    client: EasySMSClient,
+    shipments: list[Shipment],
+    carrier: Carrier,
+    *,
+    on_date: date | None = None,
+) -> list[str]:
+    """Create/reuse today's carrier group and add shipment mobiles as contacts."""
+    name = carrier_group_name(carrier, on_date)
+    log: list[str] = []
+    try:
+        group_id = ensure_group(client, name)
+    except (EasySMSError, OSError) as exc:
+        log.append(f"Group {name}: failed to create: {exc}")
+        return log
+
+    contact_index = _build_contact_index(client)
+    added = 0
+    failed = 0
+    seen_phones: set[str] = set()
+
+    for shipment in shipments:
+        phone = shipment.phone.strip()
+        if phone in seen_phones:
+            continue
+        seen_phones.add(phone)
+        try:
+            contact_id = ensure_contact_id(
+                client,
+                phone,
+                contact_index,
+                custom1=shipment.voucher,
+                name=(shipment.recipient_name or None),
+            )
+            add_contact_to_group(client, group_id, contact_id)
+            added += 1
+        except (EasySMSError, OSError) as exc:
+            failed += 1
+            log.append(f"Group {name}: {phone}: {exc}")
+
+    if failed == 0:
+        log.insert(0, f"Group {name}: {added} contact(s) added.")
+    else:
+        log.insert(0, f"Group {name}: {added} added, {failed} failed.")
+    return log
+
+
 def send_shipments(
     client: EasySMSClient,
     shipments: list[Shipment],
@@ -263,6 +464,39 @@ def send_shipments(
         except (KeyError, ValueError) as exc:
             log.append(f"Row {idx} ({shipment.voucher}): bad template: {exc}")
             continue
+        try:
+            send_one_sms(client, shipment.phone, text, sender=sender)
+            log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): sent.")
+        except EasySMSError as exc:
+            log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): EasySMS error: {exc}")
+        except OSError as exc:
+            log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): network: {exc}")
+    return log
+
+
+def send_carrier_shipments(
+    client: EasySMSClient,
+    shipments: list[Shipment],
+    carrier: Carrier,
+    *,
+    sender: str | None = None,
+) -> list[str]:
+    """Send the predefined tracking SMS to rows matching *carrier* only."""
+    template = tracking_template_for_carrier(carrier)
+    filtered = [s for s in shipments if s.carrier == carrier]
+    log: list[str] = []
+    if not filtered:
+        label = "ACS" if carrier == Carrier.ACS else "Box Express"
+        log.append(f"No {label} rows in the last processed batch.")
+        return log
+
+    try:
+        log.extend(populate_carrier_group(client, filtered, carrier))
+    except Exception as exc:  # noqa: BLE001 — keep sending even if grouping fails
+        log.append(f"Group setup error: {exc}")
+
+    for idx, shipment in enumerate(filtered, start=1):
+        text = format_tracking_message(template, shipment.voucher)
         try:
             send_one_sms(client, shipment.phone, text, sender=sender)
             log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): sent.")

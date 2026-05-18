@@ -36,6 +36,7 @@ def write_pair_workbook(
     pairs: Iterable[tuple[str, str]],
 ) -> Path:
     destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
     worksheet.title = sheet_name

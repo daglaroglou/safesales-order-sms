@@ -29,6 +29,7 @@ from win32more.Microsoft.UI.Xaml import (
 from win32more.Microsoft.UI.Xaml.Controls import (
     Border,
     Button,
+    Canvas,
     ColumnDefinition,
     ComboBox,
     ComboBoxItem,
@@ -53,13 +54,21 @@ from win32more.Microsoft.UI.Xaml.Controls import (
 from win32more.Microsoft.UI.Windowing import AppWindowTitleBar, TitleBarHeightOption, TitleBarTheme
 from win32more.Microsoft.UI.Xaml.Media import FontFamily, SolidColorBrush
 from win32more.Microsoft.UI.Xaml.Shapes import Ellipse
-from win32more.Microsoft.Windows.Storage.Pickers import FileOpenPicker, PickFileResult, PickerLocationId
+from win32more.Microsoft.Windows.Storage.Pickers import (
+    FileOpenPicker,
+    FolderPicker,
+    PickFileResult,
+    PickFolderResult,
+    PickerLocationId,
+)
 from win32more.Windows.Foundation import AsyncStatus, TimeSpan
 from win32more.Windows.Graphics import SizeInt32
 from win32more.Windows.UI import Color
 from win32more.winui3 import XamlApplication
 
 from easysms import EasySMSError
+from excel.models import Carrier
+from ui import config as app_config
 from ui import services
 
 # Initial window client size (DIPs). Main content reflows instead of scaling.
@@ -73,9 +82,12 @@ _WORKSPACE_SIDE_COL_WIDE = 440.0
 _SCROLLVIEW_RIGHT_GUTTER = 18.0
 # EasySMS sender IDs offered in SMS + bulk-send pickers.
 _SENDER_ID_OPTIONS = ("SAFESALES", "DIVERSITY", "TINYCOCOON")
+_COURIER_SEND_OPTIONS = ("ACS", "Box Express")
 # Bottom dock left column width — matches NavigationView.OpenPaneLength (content starts at this line).
 _NAV_PANE_WIDTH = 240.0
 _BOTTOM_DOCK_HEIGHT = 180.0
+# Fallback title bar height (DIPs) until real caption / control height is known (Tall caption ~52+).
+_TITLE_BAR_INSET_FALLBACK = 56.0
 # Single app chrome grey (dark mode) — one flat background, no Mica / header gradient.
 _APP_GREY_DARK = (43, 43, 43)
 
@@ -100,6 +112,20 @@ def _opaque_color(r: int, g: int, b: int) -> Color:
     c.G = g
     c.B = b
     return c
+
+
+def _transparent_ui_color() -> Color:
+    """Fully transparent ``Windows.UI.Color`` for caption button backgrounds."""
+    c = Color()
+    c.A = 0
+    c.R = 0
+    c.G = 0
+    c.B = 0
+    return c
+
+
+def _transparent_brush() -> SolidColorBrush:
+    return _rgb(0, 0, 0, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +191,11 @@ class SafeSalesWinUIApp(XamlApplication):
         self._page_settings: Grid | None = None
         self._current_route: str = "sms"
         self._title_bar: TitleBar | None = None
+        self._title_bar_host: Grid | None = None
+        self._pane_title_spacer: Border | None = None
+        self._caption_title_height: float = 0.0
         self._settings_hint: TextBlock | None = None
+        self._export_path_box: TextBox | None = None
         self._send_btn: Button | None = None
         self._bulk_btn: Button | None = None
 
@@ -192,7 +222,7 @@ class SafeSalesWinUIApp(XamlApplication):
         self._excel_files_text: TextBlock | None = None
         self._excel_shipments_scroll: ScrollViewer | None = None
         self._excel_shipments_text: TextBlock | None = None
-        self._excel_template: TextBox | None = None
+        self._excel_courier: ComboBox | None = None
         self._excel_sender: ComboBox | None = None
         self._last_shipments: list = []
         self._progress: ProgressRing | None = None
@@ -212,7 +242,6 @@ class SafeSalesWinUIApp(XamlApplication):
         self._themed_borders.clear()
         root = Grid()
         self._root = root
-        root.RowDefinitions.Append(self._row_auto())
         root.RowDefinitions.Append(self._row_star())
         root.RowDefinitions.Append(self._row_px(_BOTTOM_DOCK_HEIGHT))
 
@@ -237,7 +266,7 @@ class SafeSalesWinUIApp(XamlApplication):
         page_host.Children.Append(page_orders)
         page_host.Children.Append(page_settings)
 
-        title_bar = self._build_title_bar()
+        title_host = self._build_title_bar()
 
         nav = NavigationView()
         self._nav = nav
@@ -246,10 +275,30 @@ class SafeSalesWinUIApp(XamlApplication):
         nav.IsSettingsVisible = False
         nav.IsPaneToggleButtonVisible = False
         nav.OpenPaneLength = _NAV_PANE_WIDTH
-        nav.PaneTitle = "SafeSales"
+        nav.PaneTitle = ""
         nav.AlwaysShowHeader = False
         nav.VerticalAlignment = VerticalAlignment.Stretch
         nav.HorizontalAlignment = HorizontalAlignment.Stretch
+        try:
+            nav.IsTitleBarAutoPaddingEnabled = False
+        except Exception:  # noqa: BLE001
+            pass
+
+        pane_spacer = Border()
+        self._pane_title_spacer = pane_spacer
+        pane_spacer.Height = _TITLE_BAR_INSET_FALLBACK
+        pane_spacer.MinHeight = _TITLE_BAR_INSET_FALLBACK
+        pane_spacer.HorizontalAlignment = HorizontalAlignment.Stretch
+        pane_spacer.Background = None
+        pane_spacer.BorderThickness = Thickness(0, 0, 0, 0)
+        try:
+            pane_spacer.BorderBrush = _transparent_brush()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            nav.PaneHeader = pane_spacer
+        except Exception:  # noqa: BLE001
+            pass
 
         ni_sms = NavigationViewItem()
         self._nav_item_sms = ni_sms
@@ -316,10 +365,22 @@ class SafeSalesWinUIApp(XamlApplication):
         ):
             self._wire_item_tap(ni, route)
 
-        Grid.SetRow(title_bar, 0)
-        Grid.SetRow(nav, 1)
-        root.Children.Append(title_bar)
-        root.Children.Append(nav)
+        main_shell = Grid()
+        main_shell.RowDefinitions.Append(self._row_star())
+        main_shell.HorizontalAlignment = HorizontalAlignment.Stretch
+        main_shell.VerticalAlignment = VerticalAlignment.Stretch
+        Grid.SetRow(nav, 0)
+        Grid.SetColumn(nav, 0)
+        main_shell.Children.Append(nav)
+        Grid.SetRow(title_host, 0)
+        Grid.SetColumn(title_host, 0)
+        try:
+            Canvas.SetZIndex(title_host, 1)
+        except Exception:  # noqa: BLE001
+            pass
+        main_shell.Children.Append(title_host)
+        Grid.SetRow(main_shell, 0)
+        root.Children.Append(main_shell)
 
         bottom_bar = Grid()
         bottom_bar.ColumnDefinitions.Append(self._col_px(_NAV_PANE_WIDTH))
@@ -375,7 +436,7 @@ class SafeSalesWinUIApp(XamlApplication):
         Grid.SetColumn(log_wrap, 1)
         bottom_bar.Children.Append(log_wrap)
 
-        Grid.SetRow(bottom_bar, 2)
+        Grid.SetRow(bottom_bar, 1)
         root.Children.Append(bottom_bar)
 
         root.ActualThemeChanged += self._on_root_actual_theme_changed
@@ -398,6 +459,7 @@ class SafeSalesWinUIApp(XamlApplication):
             return
         self._sync_chrome_brushes()
         self._configure_win11_title_bar()
+        self._apply_title_bar_content_inset()
         self._set_api_indicator(self._api_online)
 
     def _effective_dark(self) -> bool:
@@ -420,12 +482,17 @@ class SafeSalesWinUIApp(XamlApplication):
         self._root.Background = surface
         if self._title_bar is not None:
             self._title_bar.Background = surface
+            self._strip_nav_and_titlebar_outline(self._title_bar)
+        if self._title_bar_host is not None:
+            self._title_bar_host.Background = surface
+            self._strip_nav_and_titlebar_outline(self._title_bar_host)
         if self._nav is not None:
             self._nav.Background = surface
             try:
                 self._nav.PaneBackground = surface
             except Exception:  # noqa: BLE001
                 pass
+            self._strip_nav_and_titlebar_outline(self._nav)
         for page in (self._page_sms, self._page_orders, self._page_settings):
             if page is not None:
                 page.Background = surface
@@ -433,9 +500,14 @@ class SafeSalesWinUIApp(XamlApplication):
             self._page_host.Background = surface
         if self._log_wrap is not None:
             self._log_wrap.Background = surface
+        card_bg = _rgb(255, *p.card)
         for b in self._themed_borders:
-            b.Background = surface
-            b.BorderBrush = _rgb(255, *p.border)
+            if b is self._log_wrap or b is self._status_dock:
+                b.Background = surface
+                b.BorderBrush = _rgb(255, *p.border)
+            else:
+                b.Background = card_bg
+                b.BorderBrush = None
         if self._log_header is not None:
             self._log_header.Foreground = _rgb(255, *p.primary)
         if self._balance_text is not None:
@@ -480,6 +552,9 @@ class SafeSalesWinUIApp(XamlApplication):
         if self._contact_add_btn is not None:
             self._contact_add_btn.Background = _rgb(255, *p.accent)
             self._contact_add_btn.Foreground = _rgb(255, *p.on_accent)
+        spacer = getattr(self, "_pane_title_spacer", None)
+        if spacer is not None:
+            self._strip_nav_and_titlebar_outline(spacer)
 
     def _apply_theme_request(self, *, update_combo: bool, defer: bool) -> None:
         def work() -> None:
@@ -510,6 +585,7 @@ class SafeSalesWinUIApp(XamlApplication):
 
         self._sync_chrome_brushes()
         self._configure_win11_title_bar()
+        self._apply_title_bar_content_inset()
 
     def _on_theme_combo_selection(self, sender, args) -> None:
         if self._theme_combo_guard or self._theme_combo is None:
@@ -657,26 +733,51 @@ class SafeSalesWinUIApp(XamlApplication):
             pass
 
     def _apply_title_bar_colors(self, app_tb: AppWindowTitleBar) -> None:
-        """Caption strip uses the same flat grey as the rest of the shell."""
+        """Caption strip matches app chrome; caption buttons use transparent fills (no hover squares)."""
         p = self._active_palette()
         bg = _opaque_color(*p.surface)
         fg = _opaque_color(*p.primary)
         muted = _opaque_color(*p.muted)
+        clear = _transparent_ui_color()
+        app_tb.BackgroundColor = bg
+        app_tb.InactiveBackgroundColor = bg
         for prop in (
-            "BackgroundColor",
-            "InactiveBackgroundColor",
             "ButtonBackgroundColor",
             "ButtonHoverBackgroundColor",
             "ButtonPressedBackgroundColor",
             "ButtonInactiveBackgroundColor",
         ):
-            setattr(app_tb, prop, bg)
+            try:
+                setattr(app_tb, prop, clear)
+            except Exception:  # noqa: BLE001
+                pass
         app_tb.ForegroundColor = fg
         app_tb.InactiveForegroundColor = muted
         app_tb.ButtonForegroundColor = fg
         app_tb.ButtonHoverForegroundColor = fg
         app_tb.ButtonPressedForegroundColor = fg
         app_tb.ButtonInactiveForegroundColor = muted
+
+    def _strip_nav_and_titlebar_outline(self, control) -> None:
+        """Remove default borders / rounded strokes that read as dark lines on dark chrome."""
+        if control is None:
+            return
+        z = _transparent_brush()
+        try:
+            control.BorderThickness = Thickness(0, 0, 0, 0)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            control.BorderBrush = z
+        except Exception:  # noqa: BLE001
+            try:
+                control.BorderBrush = None
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            control.CornerRadius = CornerRadiusHelper.FromUniformRadius(0)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _configure_win11_title_bar(self) -> None:
         """Wide WinUI title bar row + flat grey chrome (no Mica tint / dual-tone header)."""
@@ -685,7 +786,12 @@ class SafeSalesWinUIApp(XamlApplication):
             w.ExtendsContentIntoTitleBar = True
         except Exception:  # noqa: BLE001
             pass
-        if self._title_bar is not None:
+        if self._title_bar_host is not None:
+            try:
+                w.SetTitleBar(self._title_bar_host)
+            except Exception:  # noqa: BLE001
+                pass
+        elif self._title_bar is not None:
             try:
                 w.SetTitleBar(self._title_bar)
             except Exception:  # noqa: BLE001
@@ -694,9 +800,21 @@ class SafeSalesWinUIApp(XamlApplication):
             app_tb = w.AppWindow.TitleBar
             if AppWindowTitleBar.IsCustomizationSupported():
                 app_tb.ExtendsContentIntoTitleBar = True
-                app_tb.PreferredHeightOption = TitleBarHeightOption.Standard
+                app_tb.PreferredHeightOption = TitleBarHeightOption.Tall
                 app_tb.PreferredTheme = TitleBarTheme.Dark if self._effective_dark() else TitleBarTheme.Light
                 self._apply_title_bar_colors(app_tb)
+                try:
+                    cap_px = int(app_tb.Height)
+                    cap_h = float(cap_px) if cap_px > 0 else _TITLE_BAR_INSET_FALLBACK
+                except Exception:  # noqa: BLE001
+                    cap_h = _TITLE_BAR_INSET_FALLBACK
+                self._caption_title_height = cap_h
+                host = self._title_bar_host
+                if host is not None:
+                    try:
+                        host.MinHeight = cap_h
+                    except Exception:  # noqa: BLE001
+                        pass
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -704,13 +822,47 @@ class SafeSalesWinUIApp(XamlApplication):
         except Exception:  # noqa: BLE001
             pass
 
-    def _build_title_bar(self) -> TitleBar:
+    def _build_title_bar(self) -> Grid:
+        host = Grid()
+        self._title_bar_host = host
+        host.HorizontalAlignment = HorizontalAlignment.Stretch
+        host.VerticalAlignment = VerticalAlignment.Top
+        try:
+            host.Margin = Thickness(0, 0, 0, -2)
+        except Exception:  # noqa: BLE001
+            pass
+
         tb = TitleBar()
         self._title_bar = tb
         tb.Title = "One-time SMS"
         tb.Subtitle = "Single recipient delivery"
         tb.IsBackButtonVisible = False
         tb.IsPaneToggleButtonVisible = True
+        tb.HorizontalAlignment = HorizontalAlignment.Stretch
+        tb.VerticalAlignment = VerticalAlignment.Stretch
+        tb.BorderThickness = Thickness(0, 0, 0, 0)
+        try:
+            tb.BorderBrush = _transparent_brush()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            tb.CornerRadius = CornerRadiusHelper.FromUniformRadius(0)
+        except Exception:  # noqa: BLE001
+            pass
+        add_sz = getattr(tb, "add_SizeChanged", None)
+        if callable(add_sz):
+            try:
+                add_sz(self._on_title_bar_size_changed)
+            except Exception:  # noqa: BLE001
+                try:
+                    tb.SizeChanged += self._on_title_bar_size_changed
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            try:
+                tb.SizeChanged += self._on_title_bar_size_changed
+            except Exception:  # noqa: BLE001
+                pass
         add_toggle = getattr(tb, "add_PaneToggleRequested", None)
         if callable(add_toggle):
             try:
@@ -722,7 +874,67 @@ class SafeSalesWinUIApp(XamlApplication):
                 tb.PaneToggleRequested += self._on_title_bar_pane_toggle
             except Exception:  # noqa: BLE001
                 pass
-        return tb
+        host.Children.Append(tb)
+        return host
+
+    def _title_bar_inset_height(self) -> float:
+        cap = self._caption_title_height
+        if cap <= 0:
+            cap = _TITLE_BAR_INSET_FALLBACK
+        tb = self._title_bar
+        h_ctrl = 0.0
+        if tb is not None:
+            try:
+                h_ctrl = float(tb.ActualHeight)
+            except (TypeError, ValueError):
+                h_ctrl = 0.0
+        h = max(cap, h_ctrl, _TITLE_BAR_INSET_FALLBACK)
+        return h if h > 1.0 else _TITLE_BAR_INSET_FALLBACK
+
+    def _refresh_caption_height_from_system(self) -> None:
+        """``AppWindow.TitleBar.Height`` is often 0 until after first layout; refresh when it appears."""
+        w = self._window
+        if w is None or not AppWindowTitleBar.IsCustomizationSupported():
+            return
+        try:
+            app_tb = w.AppWindow.TitleBar
+            cap_px = int(app_tb.Height)
+            if cap_px <= 0:
+                return
+            cap_h = float(cap_px)
+            if cap_h > self._caption_title_height + 0.5:
+                self._caption_title_height = cap_h
+                host = self._title_bar_host
+                if host is not None:
+                    host.MinHeight = cap_h
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _apply_title_bar_content_inset(self) -> None:
+        """Reserve space under the overlaid title bar for page content and nav menu.
+
+        Use ``Padding`` (not ``Margin``) so the inset is filled with ``page_host.Background``;
+        margin would leave a transparent gap where NavigationView's darker frame shows through.
+        """
+        self._refresh_caption_height_from_system()
+        h = self._title_bar_inset_height()
+        ph = self._page_host
+        if ph is not None:
+            try:
+                ph.Margin = Thickness(0, 0, 0, 0)
+                ph.Padding = Thickness(0, h, 0, 0)
+            except Exception:  # noqa: BLE001
+                pass
+        spacer = self._pane_title_spacer
+        if spacer is not None:
+            try:
+                spacer.Height = h
+                spacer.MinHeight = h
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _on_title_bar_size_changed(self, sender, args) -> None:
+        self._enqueue(self._apply_title_bar_content_inset, high=True)
 
     def _on_title_bar_pane_toggle(self, sender, args) -> None:
         nav = self._nav
@@ -780,11 +992,10 @@ class SafeSalesWinUIApp(XamlApplication):
     def _card(self, inner, *, pad: float = 24.0) -> Border:
         b = Border()
         b.Padding = Thickness(pad, pad, pad, pad)
-        b.BorderThickness = Thickness(1, 1, 1, 1)
-        b.CornerRadius = CornerRadiusHelper.FromUniformRadius(14)
+        b.BorderThickness = Thickness(0, 0, 0, 0)
+        b.CornerRadius = CornerRadiusHelper.FromUniformRadius(0)
         b.Child = inner
         b.HorizontalAlignment = HorizontalAlignment.Stretch
-        b.MaxWidth = 1400
         return self._register_card(b)
 
     def _scrollviewer_content_inset(self, inner) -> Border:
@@ -815,6 +1026,35 @@ class SafeSalesWinUIApp(XamlApplication):
             return None
         if 0 <= idx < len(_SENDER_ID_OPTIONS):
             return _SENDER_ID_OPTIONS[idx]
+        return None
+
+    def _build_courier_send_combo(self) -> ComboBox:
+        c = ComboBox()
+        c.Header = "Courier"
+        c.MinWidth = 240
+        for name in _COURIER_SEND_OPTIONS:
+            it = ComboBoxItem()
+            it.Content = name
+            c.Items.Append(it)
+        c.SelectedIndex = 0
+        return c
+
+    def _selected_courier_send(self, combo: ComboBox | None) -> str | None:
+        if combo is None:
+            return None
+        try:
+            idx = int(combo.SelectedIndex)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= idx < len(_COURIER_SEND_OPTIONS):
+            return _COURIER_SEND_OPTIONS[idx]
+        return None
+
+    def _carrier_from_courier_option(self, option: str) -> Carrier | None:
+        if option == "ACS":
+            return Carrier.ACS
+        if option == "Box Express":
+            return Carrier.BOX_EXPRESS
         return None
 
     def _card_scroll_host(self, inner: StackPanel) -> ScrollViewer:
@@ -853,7 +1093,7 @@ class SafeSalesWinUIApp(XamlApplication):
         if side_card is None:
             g.RowDefinitions.Append(self._row_star())
             g.ColumnDefinitions.Append(star_col())
-            main_card.Margin = Thickness(20, 0, 20, 0)
+            main_card.Margin = Thickness(16, 0, 16, 0)
             Grid.SetRow(main_card, 0)
             Grid.SetColumn(main_card, 0)
             g.Children.Append(main_card)
@@ -878,8 +1118,8 @@ class SafeSalesWinUIApp(XamlApplication):
                 g.RowDefinitions.Append(self._row_star())
                 g.RowDefinitions.Append(auto_row())
                 g.ColumnDefinitions.Append(star_col())
-                main_card.Margin = Thickness(20, 0, 20, 10)
-                side_card.Margin = Thickness(20, 0, 20, 0)
+                main_card.Margin = Thickness(16, 0, 16, 10)
+                side_card.Margin = Thickness(16, 0, 16, 0)
                 Grid.SetRow(main_card, 0)
                 Grid.SetColumn(main_card, 0)
                 Grid.SetRow(side_card, 1)
@@ -888,8 +1128,8 @@ class SafeSalesWinUIApp(XamlApplication):
                 g.RowDefinitions.Append(self._row_star())
                 g.ColumnDefinitions.Append(star_col())
                 g.ColumnDefinitions.Append(px_col(_WORKSPACE_SIDE_COL_WIDE))
-                main_card.Margin = Thickness(20, 0, 12, 0)
-                side_card.Margin = Thickness(12, 0, 20, 0)
+                main_card.Margin = Thickness(16, 0, 10, 0)
+                side_card.Margin = Thickness(10, 0, 16, 0)
                 Grid.SetRow(main_card, 0)
                 Grid.SetColumn(main_card, 0)
                 Grid.SetRow(side_card, 0)
@@ -997,10 +1237,33 @@ class SafeSalesWinUIApp(XamlApplication):
         self._theme_combo_guard = False
         combo.SelectionChanged += self._on_theme_combo_selection
 
+        files_header = self._section_header("Files")
+
+        export_hint = TextBlock()
+        export_hint.Text = (
+            "When you process ACS or Box Express workbooks, trimmed exports are saved here."
+        )
+        export_hint.TextWrapping = TextWrapping.Wrap
+        export_hint.FontSize = 13
+
+        self._export_path_box = TextBox()
+        self._export_path_box.Header = "Export folder"
+        self._export_path_box.PlaceholderText = "Choose a folder for trimmed .xlsx files"
+        self._export_path_box.IsReadOnly = True
+        self._export_path_box.Text = str(app_config.get_export_directory())
+
+        export_btn = Button()
+        export_btn.Content = "Browse"
+        export_btn.MinWidth = 112
+        export_btn.add_Click(self._on_browse_export_dir)
+
         main.Children.Append(header)
         main.Children.Append(appearance_header)
         main.Children.Append(hint)
         main.Children.Append(combo)
+        main.Children.Append(files_header)
+        main.Children.Append(export_hint)
+        main.Children.Append(self._file_row(self._export_path_box, export_btn))
 
         side = StackPanel()
         side.Spacing = 8
@@ -1027,7 +1290,7 @@ class SafeSalesWinUIApp(XamlApplication):
             self._card(self._card_scroll_host(side), pad=20),
         )
         pad = Border()
-        pad.Padding = Thickness(24, 24, 24, 32)
+        pad.Padding = Thickness(24, 8, 24, 32)
         pad.Child = content
         return self._fill_page(pad)
 
@@ -1219,7 +1482,7 @@ class SafeSalesWinUIApp(XamlApplication):
             self._card(self._card_scroll_host(side), pad=20),
         )
         pad = Border()
-        pad.Padding = Thickness(24, 24, 24, 32)
+        pad.Padding = Thickness(24, 8, 24, 32)
         pad.Child = content
         return self._fill_page(pad)
 
@@ -1301,12 +1564,7 @@ class SafeSalesWinUIApp(XamlApplication):
 
         compose_header = self._section_header("Compose")
 
-        self._excel_template = TextBox()
-        self._excel_template.Header = "Message template — {voucher}, {phone}, {carrier}, {source_file}"
-        self._excel_template.PlaceholderText = "Hello {phone}, your shipment {voucher} is on the way."
-        self._excel_template.TextWrapping = TextWrapping.Wrap
-        self._excel_template.AcceptsReturn = True
-        self._excel_template.MinHeight = 64
+        self._excel_courier = self._build_courier_send_combo()
 
         self._excel_sender = self._build_sender_id_combo()
 
@@ -1330,7 +1588,7 @@ class SafeSalesWinUIApp(XamlApplication):
         panel.Children.Append(self._file_row(self._box_path_box, box_btn))
         panel.Children.Append(process_btn)
         panel.Children.Append(compose_header)
-        panel.Children.Append(self._excel_template)
+        panel.Children.Append(self._excel_courier)
         panel.Children.Append(self._excel_sender)
         panel.Children.Append(bulk_btn)
 
@@ -1371,7 +1629,7 @@ class SafeSalesWinUIApp(XamlApplication):
             self._card(self._card_scroll_host(side), pad=20),
         )
         pad = Border()
-        pad.Padding = Thickness(24, 24, 24, 32)
+        pad.Padding = Thickness(24, 8, 24, 32)
         pad.Child = content
         return self._fill_page(pad)
 
@@ -1559,6 +1817,46 @@ class SafeSalesWinUIApp(XamlApplication):
         self._pick_target = "box"
         self._launch_file_picker()
 
+    def _on_browse_export_dir(self, sender, args) -> None:
+        self._launch_folder_picker()
+
+    def _launch_folder_picker(self) -> None:
+        wid = self._window.AppWindow.Id
+        picker = FolderPicker(wid)
+        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary
+
+        op = picker.PickSingleFolderAsync()
+
+        def completed(ai, st):
+            if st != AsyncStatus.Completed:
+                return
+            try:
+                res: PickFolderResult | None = ai.GetResults()
+            except Exception:
+                return
+            path = ""
+            if res is not None:
+                try:
+                    path = str(res.Path or "")
+                except Exception:
+                    return
+            if not path:
+                return
+
+            def apply():
+                try:
+                    resolved = app_config.set_export_directory(path)
+                except OSError as exc:
+                    self._log(f"Export folder error: {exc}")
+                    return
+                if self._export_path_box is not None:
+                    self._export_path_box.Text = str(resolved)
+                self._log(f"Export folder: {resolved}")
+
+            self._enqueue(apply)
+
+        op.Completed = completed
+
     def _launch_file_picker(self) -> None:
         wid = self._window.AppWindow.Id
         picker = FileOpenPicker(wid)
@@ -1670,9 +1968,10 @@ class SafeSalesWinUIApp(XamlApplication):
         if not self._last_shipments:
             self._log("Process files first.")
             return
-        template = (self._excel_template.Text or "").strip()
-        if not template:
-            self._log("Message template empty.")
+        courier_option = self._selected_courier_send(self._excel_courier)
+        carrier = self._carrier_from_courier_option(courier_option or "")
+        if carrier is None:
+            self._log("Select a courier.")
             return
 
         sender_id = self._selected_sender_id(self._excel_sender)
@@ -1683,7 +1982,9 @@ class SafeSalesWinUIApp(XamlApplication):
 
         def worker():
             try:
-                lines = services.send_shipments(client, shipments_snapshot, template, sender=sender_id)
+                lines = services.send_carrier_shipments(
+                    client, shipments_snapshot, carrier, sender=sender_id
+                )
             except Exception as exc:  # noqa: BLE001
                 err_tb = traceback.format_exc()
                 self._enqueue(lambda: self._finish_bulk(None, f"{exc}\n{err_tb}"))
