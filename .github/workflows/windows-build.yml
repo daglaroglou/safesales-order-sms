@@ -172,6 +172,7 @@ jobs:
 
           if ($normalizedTag) {
             $title = "Release $normalizedTag"
+            $commitMode = "range"
             if ($prevTag) {
               $range = "$prevTag..HEAD"
               $heading = "## What's New in $normalizedTag"
@@ -184,14 +185,19 @@ jobs:
           } else {
             $shortSha = "${{ github.sha }}".Substring(0, 7)
             $title = "Build $shortSha"
-            $range = "HEAD~20..HEAD"
+            $commitMode = "count"
+            $maxCommits = 20
             $heading = "## Build Snapshot"
             $subheading = "_No release tag for this run_"
           }
 
           $rawCommits = @()
           try {
-            $rawCommits = @(git log $range --pretty=format:'%s|%h|%H|%an')
+            if ($commitMode -eq "count") {
+              $rawCommits = @(git log -n $maxCommits --pretty=format:'%s|%h|%H|%an')
+            } else {
+              $rawCommits = @(git log $range --pretty=format:'%s|%h|%H|%an')
+            }
           }
           catch {
             $rawCommits = @()
