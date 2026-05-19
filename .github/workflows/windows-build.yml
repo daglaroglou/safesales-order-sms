@@ -213,7 +213,7 @@ jobs:
             $full = $parts[2].Trim()
             $author = $parts[3].Trim()
             if (-not $subject) { continue }
-            $commitItems += "- $subject ([`$short`]($repoUrl/commit/$full), $author)"
+            $commitItems += ("- {0} ([{1}]({2}/commit/{3}), {4})" -f $subject, $short, $repoUrl, $full, $author)
           }
 
           if (-not $commitItems) {
