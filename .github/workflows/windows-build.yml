@@ -115,10 +115,22 @@ jobs:
       - name: Prepare package
         shell: pwsh
         run: |
-          $version = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "sha-${{ github.sha }}".Substring(0, 11) }
+          $rawVersion = ""
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.release-tag }}") {
+            $rawVersion = "${{ github.event.inputs.release-tag }}"
+          }
+          elseif ("${{ github.ref_type }}" -eq "tag") {
+            $rawVersion = "${{ github.ref_name }}"
+          }
+          else {
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            $rawVersion = "0.0.0-dev.$shortSha"
+          }
+          $version = if ($rawVersion -match "^v") { $rawVersion } else { "v$rawVersion" }
+          $version = $version -replace "[^0-9A-Za-z\.\-\+]", "-"
           New-Item -ItemType Directory -Path "release" -Force | Out-Null
           $exeInDist = "${env:DIST_DIR}/${env:APP_NAME}.exe"
-          $exeOut = "release/${env:APP_NAME}-windows-$version.exe"
+          $exeOut = "release/${env:APP_NAME}-$version.exe"
           if (-not (Test-Path $exeInDist)) {
             throw "Expected PyInstaller output not found: $exeInDist"
           }
@@ -138,45 +150,86 @@ jobs:
           elseif ("${{ github.ref_type }}" -eq 'tag') {
             $tag = "${{ github.ref_name }}"
           }
+          $normalizedTag = if ($tag -and $tag -notmatch '^v') { "v$tag" } else { $tag }
 
           git fetch --tags --prune
-          $prevTag = $null
+          $repoUrl = "${{ github.server_url }}/${{ github.repository }}"
+
+          $allTags = @()
           try {
-            $prevTag = git describe --tags --abbrev=0 --match 'v*' 2>$null
-          } catch {
-            $prevTag = $null
+            $allTags = @(git tag --list 'v*' --sort=-version:refname)
+          }
+          catch {
+            $allTags = @()
+          }
+          $prevTag = $null
+          foreach ($t in $allTags) {
+            if (-not $normalizedTag -or $t -ne $normalizedTag) {
+              $prevTag = $t
+              break
+            }
           }
 
-          if ($tag) {
-            if ($tag -notmatch '^v') {
-              $title = "Release v$tag"
-            } else {
-              $title = "Release $tag"
-            }
-
+          if ($normalizedTag) {
+            $title = "Release $normalizedTag"
             if ($prevTag) {
-              $commitList = git log $prevTag..HEAD --pretty=format:'- %s (%h)'
-              if (-not $commitList) {
-                $commitList = "No commits since $prevTag."
-              }
-              $body = "Commits since ${prevTag}`n`n${commitList}"
+              $range = "$prevTag..HEAD"
+              $heading = "## What's New in $normalizedTag"
+              $subheading = "_Compared with $prevTag_"
             } else {
-              $commitList = git log --pretty=format:'- %s (%h)'
-              if (-not $commitList) {
-                $commitList = "No commits available."
-              }
-              $body = "No previous release tag found.`n`nCommits in repository:`n`n${commitList}"
+              $range = "HEAD"
+              $heading = "## What's New in $normalizedTag"
+              $subheading = "_First tagged release in this repository_"
             }
           } else {
-            $title = "Build ${env:GITHUB_SHA}" 
-            $commitList = git log --pretty=format:'- %s (%h)' -n 20
-            if (-not $commitList) {
-              $commitList = "No commits available."
-            }
-            $body = "No release tag available for this run.`n`nLatest commits:`n`n${commitList}"
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            $title = "Build $shortSha"
+            $range = "HEAD~20..HEAD"
+            $heading = "## Build Snapshot"
+            $subheading = "_No release tag for this run_"
           }
 
-          echo "release_tag=$tag" >> $env:GITHUB_OUTPUT
+          $rawCommits = @()
+          try {
+            $rawCommits = @(git log $range --pretty=format:'%s|%h|%H|%an')
+          }
+          catch {
+            $rawCommits = @()
+          }
+
+          $commitItems = @()
+          foreach ($line in $rawCommits) {
+            if (-not $line) { continue }
+            $parts = $line -split '\|', 4
+            if ($parts.Count -lt 4) { continue }
+            $subject = $parts[0].Trim()
+            $short = $parts[1].Trim()
+            $full = $parts[2].Trim()
+            $author = $parts[3].Trim()
+            if (-not $subject) { continue }
+            $commitItems += "- $subject ([`$short`]($repoUrl/commit/$full), $author)"
+          }
+
+          if (-not $commitItems) {
+            $commitItems = @("- No commits found for this range.")
+          }
+
+          $bodyLines = @(
+            $heading,
+            "",
+            $subheading,
+            "",
+            "### Commit History",
+            ""
+          ) + $commitItems + @(
+            "",
+            "---",
+            "",
+            "Generated by GitHub Actions: [Run #${{ github.run_number }}]($repoUrl/actions/runs/${{ github.run_id }})"
+          )
+          $body = $bodyLines -join "`n"
+
+          echo "release_tag=$normalizedTag" >> $env:GITHUB_OUTPUT
           echo "release_title=$title" >> $env:GITHUB_OUTPUT
           Add-Content -Path $env:GITHUB_OUTPUT -Value "release_body<<EOF"
           Add-Content -Path $env:GITHUB_OUTPUT -Value $body
@@ -194,7 +247,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.release-tag != ''
         shell: pwsh
         run: |
-          $tag = "${{ github.event.inputs.release-tag }}"
+          $rawTag = "${{ github.event.inputs.release-tag }}"
+          $tag = if ($rawTag -match '^v') { $rawTag } else { "v$rawTag" }
           git config user.email "actions@github.com"
           git config user.name "GitHub Actions"
           if (-not (git tag --list $tag)) {
