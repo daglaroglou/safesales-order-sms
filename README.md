@@ -50,8 +50,3 @@ From one clean interface, you can import courier workbooks, validate rows, send 
 - WinUI 3 shell (`win32more`)
 - EasySMS API integration
 - Excel parsing pipeline for courier sheets
-
-## Language Files
-
-- English: `README.md`
-- Greek: `README.el.md`
