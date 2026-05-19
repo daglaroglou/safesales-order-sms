@@ -6,7 +6,7 @@ on:
       python-version:
         description: "Python version used for build"
         required: true
-        default: "3.12"
+        default: "3.14"
       artifact-retention-days:
         description: "Artifact retention (days)"
         required: true
@@ -48,7 +48,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python-version || '3.12' }}
+          python-version: ${{ inputs.python-version || '3.14' }}
           cache: pip
           cache-dependency-path: requirements.txt
 
@@ -83,7 +83,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ inputs.python-version || '3.12' }}
+          python-version: ${{ inputs.python-version || '3.14' }}
           cache: pip
           cache-dependency-path: requirements.txt
 
