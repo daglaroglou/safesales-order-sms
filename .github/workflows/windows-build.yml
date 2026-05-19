@@ -79,7 +79,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          tags: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -124,6 +123,9 @@ jobs:
             throw "Expected PyInstaller output not found: $exeInDist"
           }
           Copy-Item -Path $exeInDist -Destination $exeOut -Force
+          $hash = (Get-FileHash -Path $exeOut -Algorithm SHA256).Hash.ToLower()
+          $shaFile = "$exeOut.sha256"
+          Set-Content -Path $shaFile -Value "$hash  $([System.IO.Path]::GetFileName($exeOut))"
 
       - name: Compute release metadata
         id: release-info
@@ -211,6 +213,7 @@ jobs:
           body: ${{ steps.release-info.outputs.release_body }}
           files: |
             release/*.exe
+            release/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -218,6 +221,8 @@ jobs:
         shell: pwsh
         run: |
           $exe = Get-ChildItem release/*.exe | Select-Object -First 1
+          $sha = Get-ChildItem release/*.sha256 | Select-Object -First 1
+          $shaValue = if ($sha) { (Get-Content $sha.FullName | Select-Object -First 1) } else { "N/A" }
           @"
           ## Windows build completed
 
@@ -225,6 +230,7 @@ jobs:
           |---|---|
           | File | $($exe.Name) |
           | Size | $([math]::Round($exe.Length / 1MB, 2)) MB |
+          | SHA256 | $shaValue |
           | Run URL | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
 

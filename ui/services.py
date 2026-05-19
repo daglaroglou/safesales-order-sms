@@ -2,23 +2,17 @@
 
 from __future__ import annotations
 
-import os
 import traceback
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-try:
-    import dotenv as _dotenv
-except ModuleNotFoundError:  # pragma: no cover
-    _dotenv = None
-
 from easysms import EasySMSClient, EasySMSError
 from excel.loader import parse_excel_file
 from excel.models import Carrier, Shipment
 from excel.utils import format_export_date
-from ui.config import get_export_directory
+from ui import config as app_config
 
 ACS_TRACKING_SMS_TEMPLATE = (
     "H αποστολή σας έχει γίνει με ACS Courier και αριθμό αποστολής [[custom1]]. "
@@ -30,15 +24,8 @@ BOX_EXPRESS_TRACKING_SMS_TEMPLATE = (
 )
 
 
-def load_dotenv_if_present() -> None:
-    if _dotenv is not None:
-        _dotenv.load_dotenv()
-
-
 def get_api_key() -> str | None:
-    load_dotenv_if_present()
-    key = (os.environ.get("API_KEY") or "").strip()
-    return key or None
+    return app_config.get_api_key()
 
 
 def get_client() -> EasySMSClient | None:
@@ -46,6 +33,29 @@ def get_client() -> EasySMSClient | None:
     if not key:
         return None
     return EasySMSClient(api_key=key)
+
+
+def build_client_for_key(api_key: str) -> EasySMSClient:
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("API key is required.")
+    return EasySMSClient(api_key=key)
+
+
+def validate_api_key(api_key: str) -> tuple[bool, str]:
+    key = (api_key or "").strip()
+    if not key:
+        return False, "API key is required."
+    client = build_client_for_key(key)
+    try:
+        client.account.balance()
+    except EasySMSError as exc:
+        return False, f"Invalid API key: {exc}"
+    except OSError as exc:
+        return False, f"Network error: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"Validation error: {exc}"
+    return True, "API key validated."
 
 
 def format_balance_response(data: object) -> str:
@@ -120,7 +130,7 @@ def process_excel_paths(
 ) -> ProcessResult:
     lines: list[str] = []
     all_shipments: list[Shipment] = []
-    export_dir = export_directory or get_export_directory()
+    export_dir = export_directory or app_config.get_export_directory()
     lines.append(f"Export folder  ·  {export_dir}")
 
     for path in paths:
@@ -497,6 +507,51 @@ def send_carrier_shipments(
 
     for idx, shipment in enumerate(filtered, start=1):
         text = format_tracking_message(template, shipment.voucher)
+        try:
+            send_one_sms(client, shipment.phone, text, sender=sender)
+            log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): sent.")
+        except EasySMSError as exc:
+            log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): EasySMS error: {exc}")
+        except OSError as exc:
+            log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): network: {exc}")
+    return log
+
+
+def send_selected_shipments(
+    client: EasySMSClient,
+    shipments: list[Shipment],
+    carriers: set[Carrier],
+    *,
+    sender: str | None = None,
+) -> list[str]:
+    """Send tracking messages for all matching carriers using each row's own template."""
+    if not carriers:
+        return ["No courier selected."]
+
+    filtered = [s for s in shipments if s.carrier in carriers]
+    if not filtered:
+        labels: list[str] = []
+        if Carrier.ACS in carriers:
+            labels.append("ACS")
+        if Carrier.BOX_EXPRESS in carriers:
+            labels.append("Box Express")
+        selected = " + ".join(labels) if labels else "selected"
+        return [f"No {selected} rows in the last processed batch."]
+
+    log: list[str] = []
+    for carrier in (Carrier.ACS, Carrier.BOX_EXPRESS):
+        if carrier not in carriers:
+            continue
+        carrier_rows = [s for s in filtered if s.carrier == carrier]
+        if not carrier_rows:
+            continue
+        try:
+            log.extend(populate_carrier_group(client, carrier_rows, carrier))
+        except Exception as exc:  # noqa: BLE001 — keep sending even if grouping fails
+            log.append(f"Group setup error ({carrier.value}): {exc}")
+
+    for idx, shipment in enumerate(filtered, start=1):
+        text = format_tracking_message(tracking_template_for_carrier(shipment.carrier), shipment.voucher)
         try:
             send_one_sms(client, shipment.phone, text, sender=sender)
             log.append(f"Row {idx} ({shipment.voucher} → {shipment.phone}): sent.")

@@ -40,6 +40,21 @@ def get_export_directory() -> Path:
     return default_export_directory()
 
 
+def get_api_key() -> str | None:
+    raw = (_load_raw().get("api_key") or "").strip()
+    return raw or None
+
+
+def set_api_key(api_key: str) -> str:
+    key = (api_key or "").strip()
+    if not key:
+        raise ValueError("api_key cannot be empty")
+    data = _load_raw()
+    data["api_key"] = key
+    _save_raw(data)
+    return key
+
+
 def set_export_directory(directory: Path | str) -> Path:
     path = Path(directory).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)

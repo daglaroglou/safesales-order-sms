@@ -86,7 +86,7 @@ _WORKSPACE_SIDE_COL_WIDE = 440.0
 _SCROLLVIEW_RIGHT_GUTTER = 18.0
 # EasySMS sender IDs offered in SMS + bulk-send pickers.
 _SENDER_ID_OPTIONS = ("SAFESALES", "DIVERSITY", "TINYCOCOON")
-_COURIER_SEND_OPTIONS = ("ACS", "Box Express")
+_COURIER_SEND_OPTIONS = ("ACS + B.E", "ACS", "Box Express")
 # Bottom dock left column width — matches NavigationView.OpenPaneLength (content starts at this line).
 _NAV_PANE_WIDTH = 240.0
 _BOTTOM_DOCK_HEIGHT = 180.0
@@ -208,6 +208,8 @@ class SafeSalesWinUIApp(XamlApplication):
 
         self._dispatcher = self._window.DispatcherQueue
         self._client = services.get_client()
+        self._api_key_input: TextBox | None = None
+        self._api_key_status: TextBlock | None = None
 
         self._balance_text: TextBlock | None = None
         self._api_status_text: TextBlock | None = None
@@ -456,7 +458,7 @@ class SafeSalesWinUIApp(XamlApplication):
         if self._api_dot is not None:
             self._api_dot.Fill = _rgb(255, *p0.offline)
         self._log("Ready.")
-        self._refresh_account_async()
+        self._ensure_api_key_on_launch()
 
     def _on_root_actual_theme_changed(self, sender, args) -> None:
         if self._theme_mode != "system":
@@ -1054,12 +1056,14 @@ class SafeSalesWinUIApp(XamlApplication):
             return _COURIER_SEND_OPTIONS[idx]
         return None
 
-    def _carrier_from_courier_option(self, option: str) -> Carrier | None:
+    def _carriers_from_courier_option(self, option: str) -> set[Carrier]:
+        if option == "ACS + B.E":
+            return {Carrier.ACS, Carrier.BOX_EXPRESS}
         if option == "ACS":
-            return Carrier.ACS
+            return {Carrier.ACS}
         if option == "Box Express":
-            return Carrier.BOX_EXPRESS
-        return None
+            return {Carrier.BOX_EXPRESS}
+        return set()
 
     def _card_scroll_host(self, inner: StackPanel) -> ScrollViewer:
         """Let tall card bodies scroll inside the workspace (bounded height from grid star row)."""
@@ -1241,6 +1245,29 @@ class SafeSalesWinUIApp(XamlApplication):
         self._theme_combo_guard = False
         combo.SelectionChanged += self._on_theme_combo_selection
 
+        api_header = self._section_header("EasySMS API")
+
+        api_hint = TextBlock()
+        api_hint.Text = "Set your API key once. The app validates it before sending messages."
+        api_hint.TextWrapping = TextWrapping.Wrap
+        api_hint.FontSize = 13
+
+        self._api_key_input = TextBox()
+        self._api_key_input.Header = "API key"
+        self._api_key_input.PlaceholderText = "Paste your EasySMS API key"
+        self._api_key_input.Text = services.get_api_key() or ""
+
+        api_btn = Button()
+        api_btn.Content = "Validate and save"
+        api_btn.MinWidth = 168
+        api_btn.HorizontalAlignment = HorizontalAlignment.Left
+        api_btn.add_Click(self._on_validate_api_key)
+
+        self._api_key_status = TextBlock()
+        self._api_key_status.Text = ""
+        self._api_key_status.TextWrapping = TextWrapping.Wrap
+        self._api_key_status.FontSize = 12
+
         files_header = self._section_header("Files")
 
         export_hint = TextBlock()
@@ -1265,6 +1292,11 @@ class SafeSalesWinUIApp(XamlApplication):
         main.Children.Append(appearance_header)
         main.Children.Append(hint)
         main.Children.Append(combo)
+        main.Children.Append(api_header)
+        main.Children.Append(api_hint)
+        main.Children.Append(self._api_key_input)
+        main.Children.Append(api_btn)
+        main.Children.Append(self._api_key_status)
         main.Children.Append(files_header)
         main.Children.Append(export_hint)
         main.Children.Append(self._file_row(self._export_path_box, export_btn))
@@ -1702,22 +1734,98 @@ class SafeSalesWinUIApp(XamlApplication):
             if self._pulse_timer is not None and self._pulse_timer.IsRunning:
                 self._pulse_timer.Stop()
 
+    def _is_network_status(self, message: str) -> bool:
+        return (message or "").lower().startswith("network error:")
+
     def _apply_account_ui(self, balance_label: str, online: bool) -> None:
         if self._balance_text is not None:
             self._balance_text.Text = balance_label or "—"
         self._set_api_indicator(online)
 
+    def _prompt_for_api_key(self, message: str) -> None:
+        self._client = None
+        if self._api_key_status is not None:
+            self._api_key_status.Text = message
+        self._switch_nav_route("settings")
+        self._set_api_indicator(False)
+        if self._balance_text is not None:
+            self._balance_text.Text = "—"
+        self._log(message)
+
+    def _ensure_api_key_on_launch(self) -> None:
+        key = services.get_api_key()
+        if not key:
+            self._prompt_for_api_key("API key not detected. Add one in Settings to continue.")
+            return
+        if self._api_key_status is not None:
+            self._api_key_status.Text = "Validating saved API key…"
+
+        def worker() -> None:
+            ok, status = services.validate_api_key(key)
+            if not ok:
+                if self._is_network_status(status):
+                    self._enqueue(lambda s=status: self._set_api_key_status(s))
+                    self._enqueue(lambda s=status: self._log(s))
+                    self._enqueue(self._refresh_account_async)
+                    return
+                self._enqueue(lambda s=status: self._prompt_for_api_key(s))
+                return
+            self._client = services.build_client_for_key(key)
+
+            def done() -> None:
+                if self._api_key_status is not None:
+                    self._api_key_status.Text = "API key validated."
+                self._refresh_account_async()
+
+            self._enqueue(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_validate_api_key(self, sender, args) -> None:
+        if self._api_key_input is None:
+            return
+        key = (self._api_key_input.Text or "").strip()
+        if self._api_key_status is not None:
+            self._api_key_status.Text = "Validating…"
+
+        def worker() -> None:
+            ok, status = services.validate_api_key(key)
+            if not ok:
+                self._enqueue(lambda: self._set_api_key_status(status))
+                return
+            try:
+                app_config.set_api_key(key)
+                self._client = services.build_client_for_key(key)
+            except (OSError, ValueError) as exc:
+                self._enqueue(lambda e=str(exc): self._set_api_key_status(f"Could not save API key: {e}"))
+                return
+
+            def done() -> None:
+                self._set_api_key_status("API key validated and saved.")
+                self._log("API key updated.")
+                self._refresh_account_async()
+                self._switch_nav_route("sms")
+
+            self._enqueue(done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_api_key_status(self, text: str) -> None:
+        if self._api_key_status is not None:
+            self._api_key_status.Text = text
+
     def _refresh_account_async(self) -> None:
         client = self._client
 
         def worker():
-            online = services.is_easysms_online(client)
             if client:
+                online = services.is_easysms_online(client)
                 try:
                     bal = services.fetch_balance_display(client)
                 except Exception:  # noqa: BLE001
                     bal = "—"
             else:
+                online = False
                 bal = "—"
             self._enqueue(lambda: self._apply_account_ui(bal, online))
 
@@ -1770,7 +1878,7 @@ class SafeSalesWinUIApp(XamlApplication):
             st.Text = ""
         if not client:
             if st is not None:
-                st.Text = "Unavailable (set API_KEY)."
+                st.Text = "Unavailable (set API key in Settings)."
             return
         if self._contact_mobile is None:
             return
@@ -1985,8 +2093,8 @@ class SafeSalesWinUIApp(XamlApplication):
             self._log("Process files first.")
             return
         courier_option = self._selected_courier_send(self._excel_courier)
-        carrier = self._carrier_from_courier_option(courier_option or "")
-        if carrier is None:
+        carriers = self._carriers_from_courier_option(courier_option or "")
+        if not carriers:
             self._log("Select a courier.")
             return
 
@@ -1998,10 +2106,10 @@ class SafeSalesWinUIApp(XamlApplication):
 
         def worker():
             try:
-                lines = services.send_carrier_shipments(
+                lines = services.send_selected_shipments(
                     client,
                     shipments_snapshot,
-                    carrier,
+                    carriers,
                     sender=sender_id,
                 )
             except Exception as exc:  # noqa: BLE001
