@@ -50,3 +50,16 @@ From one clean interface, you can import courier workbooks, validate rows, send 
 - WinUI 3 shell (`win32more`)
 - EasySMS API integration
 - Excel parsing pipeline for courier sheets
+
+## Installer
+
+A Windows installer is now supported for packaging the built EXE.
+
+To build the installer locally:
+
+1. Install NSIS on the build machine.
+2. Run `powerShell -File packaging\build_installer.ps1`.
+3. The installer will be produced in `release\`, for example `release\SafeSalesSMSSetup-1.0.0.exe`.
+
+> Note: The Windows App Runtime (Windows App SDK Runtime) is still required on target machines. If the app fails to launch after installation, install the runtime from:
+> `https://learn.microsoft.com/windows/apps/windows-app-sdk/prepare-systems`

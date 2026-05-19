@@ -17,7 +17,10 @@ _IMPL_MODULE: Final[str] = "ui._winui_app"
 _RUNTIME_MISSING_MESSAGE: Final[str] = (
     "WinUI runtime not found. This application requires the Windows App Runtime "
     "Version 2.0 (MSIX package version >= 2.0.1.0). "
-    "Install the Windows App Runtime (Windows App SDK Runtime) and retry."
+    "This dependency cannot be bundled into the one-file EXE, so it must be "
+    "installed separately.\n\n"
+    "Download and install the Windows App Runtime from: "
+    "https://learn.microsoft.com/windows/apps/windows-app-sdk/prepare-systems"
 )
 
 

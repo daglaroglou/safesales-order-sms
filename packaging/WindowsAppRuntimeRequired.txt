@@ -1,0 +1,6 @@
+SafeSales Order SMS requires the Windows App Runtime 2.0 (Windows App SDK Runtime).
+
+If the application fails to launch after installation, install the runtime from:
+https://learn.microsoft.com/windows/apps/windows-app-sdk/prepare-systems
+
+Once the runtime is installed, relaunch SafeSales Order SMS.

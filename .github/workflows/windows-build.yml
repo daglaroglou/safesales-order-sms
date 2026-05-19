@@ -112,6 +112,27 @@ jobs:
             --collect-submodules ui `
             ui/__main__.py
 
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $rawVersion = ""
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ github.event.inputs.release-tag }}") {
+            $rawVersion = "${{ github.event.inputs.release-tag }}"
+          }
+          elseif ("${{ github.ref_type }}" -eq "tag") {
+            $rawVersion = "${{ github.ref_name }}"
+          }
+          else {
+            $shortSha = "${{ github.sha }}".Substring(0, 7)
+            $rawVersion = "0.0.0-dev.$shortSha"
+          }
+          $version = if ($rawVersion -match "^v") { $rawVersion.Substring(1) } else { $rawVersion }
+          .\packaging\build_installer.ps1 -Version $version
+
       - name: Prepare package
         shell: pwsh
         run: |
