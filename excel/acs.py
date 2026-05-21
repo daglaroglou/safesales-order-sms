@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from itertools import chain
 from pathlib import Path
 from typing import Iterable
 
@@ -31,7 +32,7 @@ def _iter_acs_pairs(path: Path) -> Iterable[tuple[str, str]]:
         else:
             voucher_index = 0
             phone_index = 1
-            data_rows = iter((first_row, *rows))
+            data_rows = chain((first_row,), rows)
 
         for row in data_rows:
             if not row or all(cell is None or str(cell).strip() == "" for cell in row):
@@ -64,10 +65,12 @@ def parse_acs_file(
     on_date: date | None = None,
 ) -> list[Shipment]:
     source = Path(path)
-    destination = trim_acs_file(source, output_path=output_path, on_date=on_date)
+    destination = Path(output_path) if output_path is not None else acs_output_path(source.parent, on_date)
+    pairs = list(_iter_acs_pairs(source))
+    write_pair_workbook(destination, ACS_SHEET_NAME, pairs)
 
     shipments: list[Shipment] = []
-    for voucher, phone in _iter_acs_pairs(destination):
+    for voucher, phone in pairs:
         normalized_phone = normalize_phone(phone)
         if not normalized_phone:
             continue

@@ -27,9 +27,15 @@ try {
             ui\__main__.py
     }
 
-    $makensis = Get-Command makensis -ErrorAction SilentlyContinue
-    if (-not $makensis) {
-        throw "NSIS compiler not found. Install NSIS by running `choco install nsis -y` or install it manually."
+    $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+    if (-not $iscc) {
+        $defaultIsccPath = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+        if (Test-Path $defaultIsccPath) {
+            $iscc = Get-Item $defaultIsccPath
+        }
+    }
+    if (-not $iscc) {
+        throw "Inno Setup compiler not found. Install it by running `choco install innosetup -y`."
     }
 
     if (-not $Version) {
@@ -52,7 +58,7 @@ try {
     }
 
     Write-Host "Building installer for version $version"
-    & $makensis "/DMAyAppVersion=$version" "packaging\installer.iss"
+    & $iscc "/DMyAppVersion=$version" "packaging\installer.iss"
 }
 finally {
     Pop-Location

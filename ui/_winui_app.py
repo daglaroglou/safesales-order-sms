@@ -2037,7 +2037,7 @@ class SafeSalesWinUIApp(XamlApplication):
             except Exception as exc:  # noqa: BLE001
                 tb = traceback.format_exc()
                 self._enqueue(
-                    lambda e=str(exc), tb=traceback.format_exc(): self._finish_process(
+                    lambda e=str(exc), tb=tb: self._finish_process(
                         None,
                         "",
                         f"{e}\n{tb}",

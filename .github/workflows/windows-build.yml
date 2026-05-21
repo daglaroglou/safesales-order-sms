@@ -33,6 +33,7 @@ concurrency:
 env:
   APP_NAME: SafeSalesSMS
   DIST_DIR: dist
+  WINDOWS_APP_RUNTIME_X64_URL: https://aka.ms/windowsappsdk/2.0/2.0.2/windowsappruntimeinstall-x64.exe
   PYTHONUTF8: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
@@ -112,9 +113,26 @@ jobs:
             --collect-submodules ui `
             ui/__main__.py
 
-      - name: Install NSIS
+      - name: Install Inno Setup
         shell: pwsh
-        run: choco install nsis --no-progress -y
+        run: choco install innosetup --no-progress -y
+
+      - name: Download Windows App Runtime installer
+        shell: pwsh
+        run: |
+          $prereqDir = "packaging/prereqs"
+          New-Item -ItemType Directory -Path $prereqDir -Force | Out-Null
+          $runtimePath = "$prereqDir/WindowsAppRuntimeInstall-x64.exe"
+          Write-Host "Downloading Windows App Runtime from ${env:WINDOWS_APP_RUNTIME_X64_URL}"
+          Invoke-WebRequest `
+            -Uri "${env:WINDOWS_APP_RUNTIME_X64_URL}" `
+            -OutFile $runtimePath `
+            -MaximumRetryCount 5 `
+            -RetryIntervalSec 5
+          if (-not (Test-Path $runtimePath)) {
+            throw "Failed to download Windows App Runtime installer."
+          }
+          Write-Host "Runtime bootstrapper saved to $runtimePath"
 
       - name: Build Windows installer
         shell: pwsh
