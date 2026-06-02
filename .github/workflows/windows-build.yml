@@ -103,6 +103,7 @@ jobs:
             --clean `
             --windowed `
             --onefile `
+            --icon assets\SafeSalesSMS.ico `
             --name "${env:APP_NAME}" `
             --version-file packaging/windows_version_info.txt `
             --collect-submodules win32more `
@@ -332,4 +333,3 @@ jobs:
           | SHA256 | $shaValue |
           | Run URL | ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} |
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-

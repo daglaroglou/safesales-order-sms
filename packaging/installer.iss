@@ -18,6 +18,7 @@ DisableReadyPage=no
 DisableWelcomePage=no
 InfoBeforeFile=WindowsAppRuntimeRequired.txt
 LicenseFile=..\LICENSE
+SetupIconFile=..\assets\SafeSalesSMS.ico
 UninstallDisplayIcon={app}\SafeSalesSMS.exe
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible

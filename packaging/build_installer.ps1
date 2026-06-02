@@ -8,24 +8,28 @@ Push-Location $scriptDir\..\
 try {
     $exeName = "SafeSalesSMS.exe"
     $exePath = Join-Path "dist" $exeName
+    $iconPath = Join-Path "assets" "SafeSalesSMS.ico"
 
-    if (-not (Test-Path $exePath)) {
-        Write-Host "Building PyInstaller executable..."
-        python -m PyInstaller `
-            --noconfirm `
-            --clean `
-            --windowed `
-            --onefile `
-            --name "SafeSalesSMS" `
-            --version-file packaging/windows_version_info.txt `
-            --collect-submodules win32more `
-            --collect-binaries win32more `
-            --collect-data win32more `
-            --collect-submodules easysms `
-            --collect-submodules excel `
-            --collect-submodules ui `
-            ui\__main__.py
+    if (-not (Test-Path $iconPath)) {
+        throw "App icon not found: $iconPath"
     }
+
+    Write-Host "Building PyInstaller executable..."
+    python -m PyInstaller `
+        --noconfirm `
+        --clean `
+        --windowed `
+        --onefile `
+        --icon $iconPath `
+        --name "SafeSalesSMS" `
+        --version-file packaging/windows_version_info.txt `
+        --collect-submodules win32more `
+        --collect-binaries win32more `
+        --collect-data win32more `
+        --collect-submodules easysms `
+        --collect-submodules excel `
+        --collect-submodules ui `
+        ui\__main__.py
 
     $iscc = Get-Command iscc -ErrorAction SilentlyContinue
     if (-not $iscc) {
