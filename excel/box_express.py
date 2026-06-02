@@ -8,7 +8,7 @@ from typing import Iterable
 import openpyxl
 
 from excel.models import Carrier, Shipment
-from excel.utils import box_express_output_path, normalize_phone, normalize_text, write_pair_workbook
+from excel.utils import box_express_output_path, normalize_phone, normalize_text, should_skip_phone_number, write_pair_workbook
 
 BOX_EXPRESS_SHEET_NAME = "Worksheet"
 BOX_EXPRESS_VOUCHER_COLUMN = "Αρ. Voucher"
@@ -41,6 +41,8 @@ def _iter_box_express_pairs(path: Path) -> Iterable[tuple[str, str]]:
             voucher = normalize_text(row[voucher_index] if voucher_index < len(row) else None)
             phone = normalize_text(row[phone_index] if phone_index < len(row) else None)
             if not voucher or not phone:
+                continue
+            if should_skip_phone_number(phone):
                 continue
 
             yield voucher, phone

@@ -66,6 +66,11 @@ def normalize_phone(value: Any) -> str | None:
     return digits
 
 
+def should_skip_phone_number(value: Any) -> bool:
+    phone = normalize_phone(value)
+    return bool(phone and phone.startswith("23"))
+
+
 def normalize_text(value: Any) -> str | None:
     if value is None:
         return None
